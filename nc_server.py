@@ -36,20 +36,29 @@ def _build_search_paths(project_root: str) -> list[str]:
     ]
 
 
-def _run_nc_text_capture(nc_text: str, project_root: str, source_name: str = "<text>") -> tuple[str, dict]:
+def _server_policy(project_root: str) -> nc.NCPolicy:
+    return nc.NCPolicy(
+        allow_http=False,
+        allow_private_hosts=True,
+        data_dir=os.path.join(project_root, "_data"),
+    )
+
+
+def _run_nc_text_capture(
+    nc_text: str,
+    project_root: str,
+    source_name: str = "<text>",
+    base: str | None = None,
+) -> tuple[str, dict]:
     import contextlib
 
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf):
         nc.run_text(
             nc_text,
-            base=project_root,
+            base=base or project_root,
             extra_paths=_build_search_paths(project_root),
-            policy=nc.NCPolicy(
-                allow_http=False,
-                allow_private_hosts=True,
-                data_dir=os.path.join(project_root, "_data"),
-            ),
+            policy=_server_policy(project_root),
             enable_ui=False,
             source_name=source_name,
         )
@@ -57,11 +66,21 @@ def _run_nc_text_capture(nc_text: str, project_root: str, source_name: str = "<t
 
 
 def _run_nc_file(path: str, request_obj: dict, project_root: str) -> tuple[int, dict[str, str], bytes]:
-    injected = f'let request = {json.dumps(request_obj, ensure_ascii=False)}\n'
-    with open(path, "r", encoding="utf-8", errors="replace") as f:
-        code = f.read()
+    injected = f"let request = {repr(request_obj)}\n"
+    source_name = path
+    base = project_root
+    if path.lower().endswith(".nce"):
+        code, base, source_name = nc.nce_read_entry_text(path, policy=_server_policy(project_root))
+    else:
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
+            code = f.read()
 
-    output, _meta = _run_nc_text_capture(injected + "\n" + code, project_root=project_root, source_name=path)
+    output, _meta = _run_nc_text_capture(
+        injected + "\n" + code,
+        project_root=project_root,
+        source_name=source_name,
+        base=base,
+    )
     lines = output.splitlines()
 
     status = 200
@@ -190,13 +209,16 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_error(404)
                 return
 
-        if full.lower().endswith(".nc") and os.path.isfile(full):
+        if full.lower().endswith((".nc", ".nce")) and os.path.isfile(full):
             try:
                 status, headers, resp = _run_nc_file(full, request_obj, project_root=root)
                 content_type = headers.pop("Content-Type", "text/html; charset=utf-8")
                 self._send_bytes(status, resp, content_type, headers)
             except Exception as e:
-                self._send_bytes(500, ("NC ERROR: " + str(e)).encode("utf-8", errors="replace"))
+                self._send_bytes(
+                    500,
+                    nc.format_exception(e).encode("utf-8", errors="replace"),
+                )
             return
 
         if os.path.isfile(full):
