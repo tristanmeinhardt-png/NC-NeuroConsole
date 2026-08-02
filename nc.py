@@ -1,4 +1,4 @@
-# nc.py — NeuroConsole (NC) v1.1.1 (single-file)
+# nc.py — NeuroConsole (NC) v1.2.0-alpha.1 core
 # ============================================================
 # Includes:
 #  Parser keeps indentation after stripping comments (your new parser logic)
@@ -34,9 +34,15 @@ import decimal
 import tokenize
 import io
 import sys
+import difflib
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Tuple, Optional, Callable
 from urllib.parse import urlparse, urljoin
+
+import nc_diagnostics as _diagnostics
+
+
+__version__ = "1.2.0-alpha.1"
 
 
 # -----------------------------
@@ -50,7 +56,6 @@ def _resolve_standard_imports_dir() -> str:
     1) NC_STANDARD_IMPORTS_DIR env var
     2) "standart_imports" next to this nc.py file
     3) ~/NC/standart_imports
-    4) legacy hardcoded Windows path (only if it still exists)
 
     We also create the preferred directory when possible, so first-run imports
     do not fail just because the folder has not been created yet.
@@ -63,12 +68,8 @@ def _resolve_standard_imports_dir() -> str:
 
     local_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "standart_imports")
     home_dir = os.path.join(os.path.expanduser("~"), "NC", "standart_imports")
-    legacy_dir = r"C:\Users\meinh\NC\standart_imports"
 
     candidates.extend([local_dir, home_dir])
-
-    if os.name == "nt":
-        candidates.append(legacy_dir)
 
     for cand in candidates:
         try:
@@ -82,13 +83,6 @@ def _resolve_standard_imports_dir() -> str:
         os.makedirs(preferred, exist_ok=True)
     except Exception:
         pass
-
-    if os.name == "nt":
-        try:
-            if os.path.isdir(legacy_dir):
-                return legacy_dir
-        except Exception:
-            pass
 
     return preferred
 
@@ -164,9 +158,12 @@ class NCReportedError:
     source: str
     line: int
     message: str
+    column: int = 1
+    code: Optional[str] = None
+    help: Optional[str] = None
 
     def format(self) -> str:
-        return f"{self.source}:{self.line}: {self.message}"
+        return _diagnostics.format_errors([self])
 
 
 class NCMultiError(Exception):
@@ -175,10 +172,7 @@ class NCMultiError(Exception):
         super().__init__(header)
 
     def format(self) -> str:
-        out = [str(self)]
-        for e in self.errors:
-            out.append("  - " + e.format())
-        return "\n".join(out)
+        return _diagnostics.format_errors(self.errors, str(self))
 
 
 class NCError(Exception):
@@ -186,19 +180,41 @@ class NCError(Exception):
     Single error that keeps source/line and optionally import stack context.
     """
 
-    def __init__(self, source: str, line: int, message: str, import_stack: Optional[List[str]] = None):
+    def __init__(
+        self,
+        source: str,
+        line: int,
+        message: str,
+        import_stack: Optional[List[str]] = None,
+        *,
+        column: int = 1,
+        code: Optional[str] = None,
+        help: Optional[str] = None,
+    ):
         self.source = source
         self.line = int(line)
         self.message = str(message)
         self.import_stack = list(import_stack) if import_stack else []
+        self.column = max(1, int(column))
+        self.code = code
+        self.help = help
+        self.call_stack: List[Dict[str, Any]] = []
         super().__init__(self.__str__())
 
+    def add_frame(self, name: str, source: str, line: int) -> "NCError":
+        frame = {"name": str(name), "source": str(source), "line": int(line)}
+        if not self.call_stack or self.call_stack[-1] != frame:
+            self.call_stack.append(frame)
+        return self
+
     def __str__(self) -> str:
-        base = f"{self.source}:{self.line}: {_friendly_error_message(self.message)}"
-        if self.import_stack:
-            chain = " -> ".join(self.import_stack)
-            return f"{base}\nImport stack: {chain}"
-        return base
+        return _diagnostics.format_exception(self)
+
+
+def format_exception(error: BaseException) -> str:
+    """Public formatter used by nc, ncw, servers, and embedding hosts."""
+
+    return _diagnostics.format_exception(error)
 
 
 def _format_source(name: str) -> str:
@@ -463,6 +479,11 @@ def _rewrite_implicit_call_expr(expr: str) -> str:
 
 
 def safe_eval_expr(expr: str, env: Dict[str, Any], policy: NCPolicy) -> Any:
+    # Checkmark comparison aliases are normalized before AST parsing. This was
+    # historically implemented by redefining safe_eval_expr near the end of
+    # the file; keeping it here makes the evaluator single-source again.
+    expr = expr.replace(" is on", " == True")
+    expr = expr.replace(" is off", " == False")
     if len(expr) > policy.max_expr_len:
         raise NCExprError("Expression too long")
     parse_expr = expr
@@ -1172,6 +1193,9 @@ class NCFn:
     body: List["Stmt"]
     closure: Dict[str, Any]
     interp: "NCInterpreter"
+    source: str = "<text>"
+    line: int = 1
+    base_dir: str = "."
 
     def call(self, args: List[Any], runtime_env: Optional[Dict[str, Any]] = None) -> Any:
         if len(args) != len(self.arg_names):
@@ -1195,10 +1219,22 @@ class NCFn:
 
         for k, v in zip(self.arg_names, args):
             local[k] = v
+        self.interp._function_depth = int(getattr(self.interp, "_function_depth", 0)) + 1
         try:
-            self.interp.exec_block(self.body, local)
+            with self.interp._with_source(self.source, push_stack=False):
+                self.interp.exec_block(
+                    self.body,
+                    local,
+                    base_dir=self.base_dir,
+                    source_name=self.source,
+                )
         except NCReturn as r:
             return r.value
+        except NCError as error:
+            error.add_frame(self.name, self.source, self.line)
+            raise
+        finally:
+            self.interp._function_depth = max(0, int(getattr(self.interp, "_function_depth", 1)) - 1)
         return None
 
 
@@ -2115,6 +2151,7 @@ class NCParser:
 
     def __init__(self, text: str, source_name: str = "<text>"):
         self.source_name = _format_source(source_name)
+        _diagnostics.register_source(self.source_name, text)
         self.raw_lines = text.splitlines()
         self.logical_lines = _fold_logical_lines(text)
         self.keyword_aliases: Dict[str, str] = {}
@@ -3515,10 +3552,27 @@ class NCInterpreter:
         # outside the current nested block.
         self._program_blocks: List[Tuple[str, List[Stmt]]] = []
 
+        # Tracks whether execution currently runs inside an NC function.
+        # Top-level stray `ret` remains lenient, while real function returns
+        # must propagate back to NCFn.call instead of being swallowed.
+        self._function_depth: int = 0
+
     def _tick_steps(self, n: int = 1):
         self.step_counter += n
         if self.step_counter > self.policy.max_steps:
             raise RuntimeError("NC blocked: execution step limit exceeded")
+
+    def _raise_context_error(self, error: BaseException, source: str, line: int):
+        """Add source context once without wrapping an existing NC diagnostic."""
+
+        if isinstance(error, (NCError, NCMultiError)):
+            raise error
+        raise NCError(
+            _format_source(source),
+            int(line),
+            str(error),
+            self._import_stack,
+        ) from error
 
 
     def _eval_expr(self, expr: str, env: Dict[str, Any], *args):
@@ -3561,17 +3615,14 @@ class NCInterpreter:
             finally:
                 self._resolving_names.discard(name)
 
-            suggestions: List[str] = []
-            for k in sorted(env.keys()):
-                if not isinstance(k, str) or k.startswith("__"):
-                    continue
-                lk = k.lower()
-                if lk == name.lower():
-                    suggestions.append(k)
-                elif lk.startswith(name[:1].lower()) and len(suggestions) < 3:
-                    suggestions.append(k)
-                if len(suggestions) >= 3:
-                    break
+            candidates = sorted(
+                key
+                for key in env.keys()
+                if isinstance(key, str) and not key.startswith("__")
+            )
+            # Edit-distance matching avoids misleading suggestions that merely
+            # share the first letter (for example `package` for `pritce`).
+            suggestions = difflib.get_close_matches(name, candidates, n=3, cutoff=0.70)
 
             hint = ""
             if suggestions:
@@ -3637,6 +3688,9 @@ class NCInterpreter:
                         body=st.data.get("body") or [],
                         closure=dict(env),
                         interp=self,
+                        source=str(source_name),
+                        line=int(st.line),
+                        base_dir=str(getattr(self, "_base_dir_current", ".") or "."),
                     )
                     env[name] = fn
                     return True
@@ -3790,9 +3844,22 @@ class NCInterpreter:
             # show HTML in NCW's HTML tab (via TwinWindow)
             self.ui.html_set(str(html))
 
+        @_nc_callable
+        def app(title: str = "NC App"):
+            # ui.app is a direct event-driven API. PySide6 is loaded lazily by
+            # app.run(), so headless NC programs can still import/use `ui`.
+            from nc_ui_app import create_app
+
+            return create_app(
+                str(title),
+                base_dir=str(self._base_dir_current or "."),
+                interpreter=self,
+            )
+
         setattr(u, "window", window)
         setattr(u, "plot", plot)
         setattr(u, "table", table)
+        @_nc_callable
         def scene_set(scene):
             # render NCUI2 scene (no HTML/CSS)
             if isinstance(scene, dict):
@@ -3802,6 +3869,7 @@ class NCInterpreter:
 
         setattr(u, "html_set", html_set)
         setattr(u, "scene_set", scene_set)
+        setattr(u, "app", app)
         return u
 
     def _math_module_object(self):
@@ -4598,7 +4666,11 @@ class NCInterpreter:
         mod = NCModule(name)
         if name == "ui":
             u = self._ui_module_object()
-            mod.namespace = {"window": getattr(u, "window"), "plot": getattr(u, "plot"), "table": getattr(u, "table"), "html_set": getattr(u, "html_set")}
+            mod.namespace = {
+                key: value
+                for key, value in u.__dict__.items()
+                if not str(key).startswith("_")
+            }
             mod.exports = dict(mod.namespace)
             return mod
 
@@ -4703,7 +4775,6 @@ class NCInterpreter:
 
         if parser.errors:
             err = NCMultiError(parser.errors, header="NC parse errors")
-            print(err.format())
             raise err
 
         export_names: List[str] = []
@@ -4768,7 +4839,7 @@ class NCInterpreter:
                 text = _read_file_text(ref, self.policy)
                 new_base = os.path.dirname(ref)
         except Exception as e:
-            raise NCError(_format_source(caller_source), caller_line, str(e), self._import_stack) from e
+            self._raise_context_error(e, caller_source, caller_line)
 
         module = NCModule(name)
         self.module_cache[key] = module
@@ -4777,7 +4848,6 @@ class NCInterpreter:
         stmts = parser.parse()
         if parser.errors:
             err = NCMultiError(parser.errors, header="NC parse errors")
-            print(err.format())
             raise err
 
         export_names: List[str] = []
@@ -4852,6 +4922,10 @@ class NCInterpreter:
             except (NCMultiError, NCError, NCEnd):
                 raise
             except NCReturn as r:
+                if int(getattr(self, "_function_depth", 0)) > 0:
+                    raise
+                # Keep the historical lenient top-level behavior: a stray
+                # return is stored instead of crashing the whole NC program.
                 env["__last_return__"] = r.value
             except Exception as e:
                 raise NCError(_format_source(source_name), st.line, str(e), self._import_stack) from e
@@ -5000,14 +5074,14 @@ class NCInterpreter:
             try:
                 env[d["name"]] = self._eval_expr(d["expr"], env, self.policy)
             except Exception as e:
-                raise NCError(_format_source(source_name), st.line, str(e), self._import_stack) from e
+                self._raise_context_error(e, source_name, st.line)
             return
 
         if k == "set":
             try:
                 env[d["name"]] = self._eval_expr(d["expr"], env, self.policy)
             except Exception as e:
-                raise NCError(_format_source(source_name), st.line, str(e), self._import_stack) from e
+                self._raise_context_error(e, source_name, st.line)
             return
 
         if k == "print":
@@ -5018,14 +5092,14 @@ class NCInterpreter:
                     parts.append(str(v))
                 _console_print_colored(" ".join(parts), env.get("__text_color__"))
             except Exception as e:
-                raise NCError(_format_source(source_name), st.line, str(e), self._import_stack) from e
+                self._raise_context_error(e, source_name, st.line)
             return
 
         if k == "return":
             try:
                 v = self._eval_expr(d["expr"], env, self.policy)
             except Exception as e:
-                raise NCError(_format_source(source_name), st.line, str(e), self._import_stack) from e
+                self._raise_context_error(e, source_name, st.line)
             raise NCReturn(v)
 
         if k == "break":
@@ -5041,14 +5115,14 @@ class NCInterpreter:
             try:
                 _ = self._eval_expr(d["expr"], env, self.policy)
             except Exception as e:
-                raise NCError(_format_source(source_name), st.line, str(e), self._import_stack) from e
+                self._raise_context_error(e, source_name, st.line)
             return
 
         if k == "if":
             try:
                 cond_ok = bool(self._eval_expr(d["cond"], env, self.policy))
             except Exception as e:
-                raise NCError(_format_source(source_name), st.line, str(e), self._import_stack) from e
+                self._raise_context_error(e, source_name, st.line)
 
             if cond_ok:
                 self.exec_block(d["then"], env, base_dir, extra_paths, in_module, source_name)
@@ -5059,7 +5133,7 @@ class NCInterpreter:
                         self.exec_block(b, env, base_dir, extra_paths, in_module, source_name)
                         return
                 except Exception as e:
-                    raise NCError(_format_source(source_name), st.line, str(e), self._import_stack) from e
+                    self._raise_context_error(e, source_name, st.line)
             if d["else"] is not None:
                 self.exec_block(d["else"], env, base_dir, extra_paths, in_module, source_name)
             return
@@ -5072,19 +5146,19 @@ class NCInterpreter:
                 action = self._eval_expr(d["action"], env, self.policy)
                 n = int(self._eval_expr(d["n"], env, self.policy))
             except Exception as e:
-                raise NCError(_format_source(source_name), st.line, str(e), self._import_stack) from e
+                self._raise_context_error(e, source_name, st.line)
             for _ in range(max(0, n)):
                 try:
                     self._invoke_zero_arg_action(action, env=env)
                 except Exception as e:
-                    raise NCError(_format_source(source_name), st.line, str(e), self._import_stack) from e
+                    self._raise_context_error(e, source_name, st.line)
             return
 
         if k == "repeat":
             try:
                 n = int(self._eval_expr(d["n"], env, self.policy))
             except Exception as e:
-                raise NCError(_format_source(source_name), st.line, str(e), self._import_stack) from e
+                self._raise_context_error(e, source_name, st.line)
             for _ in range(max(0, n)):
                 try:
                     self.exec_block(d["body"], env, base_dir, extra_paths, in_module, source_name)
@@ -5100,7 +5174,7 @@ class NCInterpreter:
                     if not bool(self._eval_expr(d["cond"], env, self.policy)):
                         break
                 except Exception as e:
-                    raise NCError(_format_source(source_name), st.line, str(e), self._import_stack) from e
+                    self._raise_context_error(e, source_name, st.line)
                 try:
                     self.exec_block(d["body"], env, base_dir, extra_paths, in_module, source_name)
                 except NCContinue:
@@ -5113,7 +5187,7 @@ class NCInterpreter:
             try:
                 it = self._eval_expr(d["iter"], env, self.policy)
             except Exception as e:
-                raise NCError(_format_source(source_name), st.line, str(e), self._import_stack) from e
+                self._raise_context_error(e, source_name, st.line)
             # lenient: None => empty loop
             if it is None:
                 iterator = iter(())
@@ -5142,6 +5216,9 @@ class NCInterpreter:
                 body=d["body"],
                 closure=dict(env),
                 interp=self,
+                source=str(source_name),
+                line=int(st.line),
+                base_dir=str(base_dir or "."),
             )
             env[d["name"]] = fn
             return
@@ -5152,7 +5229,7 @@ class NCInterpreter:
                 try:
                     tbl[key] = self._eval_expr(ex, env, self.policy)
                 except Exception as e:
-                    raise NCError(_format_source(source_name), _ln, str(e), self._import_stack) from e
+                    self._raise_context_error(e, source_name, _ln)
             env[d["name"]] = tbl
             return
 
@@ -5160,21 +5237,21 @@ class NCInterpreter:
             try:
                 env["__text_color__"] = self._eval_expr(d["expr"], env, self.policy)
             except Exception as e:
-                raise NCError(_format_source(source_name), st.line, str(e), self._import_stack) from e
+                self._raise_context_error(e, source_name, st.line)
             return
 
         if k == "text_color":
             try:
                 env["__text_color__"] = self._eval_expr(d["expr"], env, self.policy)
             except Exception as e:
-                raise NCError(_format_source(source_name), st.line, str(e), self._import_stack) from e
+                self._raise_context_error(e, source_name, st.line)
             return
 
         if k == "button_color_all":
             try:
                 env["__button_color_all__"] = self._eval_expr(d["expr"], env, self.policy)
             except Exception as e:
-                raise NCError(_format_source(source_name), st.line, str(e), self._import_stack) from e
+                self._raise_context_error(e, source_name, st.line)
             return
 
         if k == "button_color":
@@ -5335,7 +5412,6 @@ class NCInterpreter:
             stmts2 = parser.parse()
             if parser.errors:
                 err = NCMultiError(parser.errors, header="NC parse errors (run)")
-                print(err.format())
                 raise err
             with self._with_source(str(ref), push_stack=True):
                 self.exec_block(
@@ -5376,7 +5452,7 @@ class NCInterpreter:
                 val = self._eval_expr(expr, env, self.policy)
                 self.ui.plot(series, float(val), step)
             except Exception as e:
-                raise NCError(_format_source(source_name), line, str(e), self._import_stack) from e
+                self._raise_context_error(e, source_name, line)
 
         for name, vars_ in tables:
             rows = []
@@ -5582,6 +5658,9 @@ def run_text(
     enable_ui: bool = True,
     source_name: str = "<text>",
 ) -> Dict[str, Any]:
+    preprocess = globals().get("_nc_preprocess_ai_blocks")
+    if callable(preprocess):
+        nc_text = preprocess(nc_text)
     # Auto-detect MathNC
     if _math_is_triggered(nc_text):
         return run_math_text(
@@ -5601,7 +5680,6 @@ def run_text(
 
     if parser.errors:
         err = NCMultiError(parser.errors, header="NC parse errors")
-        print(err.format())
         raise err
 
     stmts = _expand_repeat_program_top_level(stmts, str(source_name))
@@ -5977,10 +6055,6 @@ def _nc_preprocess_ai_blocks(nc_text: str) -> str:
     return '\n'.join(out)
 
 
-_ORIG_RUN_TEXT = run_text
-_ORIG_RUN_FILE = run_file
-_ORIG_RUN_URL = run_url
-_ORIG_RUN_NC_TEXT = run_nc_text
 _ORIG_BASE_ENV = NCInterpreter.base_env
 _ORIG_EXEC_BLOCK = NCInterpreter.exec_block
 
@@ -6376,27 +6450,6 @@ def _nc_exec_block_with_debug(self, stmts, env, base_dir='.', extra_paths=None, 
         st['profile'].setdefault('timings', []).append({'op': 'exec_block', 'seconds': time.time() - started, 'source': str(source_name)})
 
 
-def run_text(nc_text: str, base: str='.', extra_paths=None, policy=None, enable_ui: bool=True, source_name: str='<text>'):
-    return _ORIG_RUN_TEXT(_nc_preprocess_ai_blocks(nc_text), base=base, extra_paths=extra_paths, policy=policy, enable_ui=enable_ui, source_name=source_name)
-
-
-def run_file(path: str, policy=None, enable_ui: bool=True, extra_paths=None):
-    policy = policy or NCPolicy()
-    abs_path = os.path.abspath(path)
-    text = _read_file_text(abs_path, policy)
-    return run_text(text, base=os.path.dirname(abs_path) or os.getcwd(), extra_paths=extra_paths, policy=policy, enable_ui=enable_ui, source_name=abs_path)
-
-
-def run_url(url: str, policy=None, enable_ui: bool=True, extra_paths=None):
-    policy = policy or NCPolicy()
-    text = _fetch_url_text(url, policy)
-    return run_text(text, base=url.rsplit('/',1)[0]+'/', extra_paths=extra_paths, policy=policy, enable_ui=enable_ui, source_name=url)
-
-
-def run_nc_text(nc_text: str, base: str='.', search_paths=None, policy=None, enable_ui: bool=True):
-    return run_text(nc_text, base=base, extra_paths=search_paths, policy=policy, enable_ui=enable_ui, source_name='<text>')
-
-
 NCInterpreter.base_env = _nc_new_base_env
 NCInterpreter.exec_block = _nc_exec_block_with_debug
 
@@ -6528,28 +6581,6 @@ if '_friendly_error_message' not in globals():
             if needle in s:
                 return s + ' | Hint: ' + hint
         return s
-
-
-
-# --- BUGFIX PATCH: allow 'if var is on/off:' syntax for checkmarks ---
-# maps 'on' -> True and 'off' -> False inside comparisons
-
-_old_safe_eval_expr = safe_eval_expr
-
-def _nc_on_off_literal(value):
-    if isinstance(value, str):
-        s = value.strip().lower()
-        if s == "on":
-            return True
-        if s == "off":
-            return False
-    return value
-
-def safe_eval_expr(expr: str, env: dict, policy):
-    expr = expr.replace(" is on", " == True")
-    expr = expr.replace(" is off", " == False")
-    return _old_safe_eval_expr(expr, env, policy)
-# --- END BUGFIX PATCH ---
 
 
 
@@ -6963,6 +6994,22 @@ def _nc_ext_builtin_module(self, name):
         if base_mod is not None:
             return base_mod
 
+    # Larger native modules are kept in separate files and imported lazily.
+    # This prevents physics or renderer dependencies from slowing down plain
+    # console programs and gives every module an independent test boundary.
+    try:
+        from nc_module_registry import build_builtin_module
+
+        native_module = build_builtin_module(str(name), self, NCModule)
+        if native_module is not None:
+            return native_module
+    except ImportError as exc:
+        # Compatibility with older portable folders that do not yet contain
+        # the registry. Missing imports *inside* a registered module are real
+        # dependency errors and must remain visible.
+        if getattr(exc, "name", "") != "nc_module_registry":
+            raise
+
     makers = {
         'file': self._file_module_object,
         'time': self._time_module_object,
@@ -7024,7 +7071,6 @@ def _nc_ext_load_module(self, name, base, extra_paths=None, depth=0, caller_sour
     stmts = parser.parse()
     if parser.errors:
         err = NCMultiError(parser.errors, header="NC parse errors")
-        print(err.format())
         raise err
 
     export_names = []
@@ -7153,4 +7199,382 @@ def _nc_ext_split_commas(s: str) -> list:
     return out
 
 
+# ============================================================
+# NCE packages (NC encrypted archives)
+# ============================================================
+# .nce is intentionally not a renamed ZIP. It stores a tar stream in memory,
+# compresses it losslessly, then encrypts it with AES-GCM.
 
+_NCE_MAGIC = b"NCENCRYPTED1\n"
+_NCE_DEFAULT_ITERATIONS = 390_000
+_NCE_CACHE: Dict[str, Dict[str, Any]] = {}
+
+try:
+    NCInterpreter._builtin_module = _nc_ext_builtin_module
+    NCInterpreter.load_module = _nc_ext_load_module
+    NCInterpreter.base_env = _nc_ext_base_env
+except Exception:
+    pass
+
+_NCE_ORIG_READ_FILE_TEXT = _read_file_text
+_NCE_ORIG_RESOLVE_REF = _resolve_ref
+_NCE_ORIG_RUN_FILE = run_file
+_NCE_ORIG_LOAD_FROM = NCInterpreter.load_from
+_NCE_ORIG_BASE_ENV = NCInterpreter.base_env
+
+
+def _nce_require_crypto():
+    try:
+        from cryptography.hazmat.primitives import hashes
+        from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+        from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
+    except Exception as e:
+        raise RuntimeError("NCE needs the Python package 'cryptography'. Install: pip install cryptography") from e
+    return hashes, AESGCM, PBKDF2HMAC
+
+
+def _nce_password(password: Optional[str] = None, *, prompt: bool = False, confirm: bool = False) -> str:
+    if password is None:
+        password = os.environ.get("NC_NCE_PASSWORD")
+    if password is None and prompt:
+        import getpass
+        first = getpass.getpass("NCE password: ")
+        if confirm:
+            second = getpass.getpass("Repeat NCE password: ")
+            if first != second:
+                raise ValueError("NCE passwords do not match")
+        password = first
+    password = "" if password is None else str(password)
+    if not password:
+        raise ValueError("NCE password missing. Use --nce-password or set NC_NCE_PASSWORD.")
+    if len(password) < 8:
+        raise ValueError("NCE password must be at least 8 characters long")
+    return password
+
+
+def _nce_key(password: str, salt: bytes, iterations: int) -> bytes:
+    hashes, _AESGCM, PBKDF2HMAC = _nce_require_crypto()
+    kdf = PBKDF2HMAC(
+        algorithm=hashes.SHA256(),
+        length=32,
+        salt=salt,
+        iterations=int(iterations),
+    )
+    return kdf.derive(password.encode("utf-8"))
+
+
+def _nce_norm_inner(path: str) -> str:
+    p = str(path or "").replace("\\", "/").strip()
+    p = p[2:] if p.startswith("./") else p
+    p = p.lstrip("/")
+    parts = []
+    for part in p.split("/"):
+        if not part or part == ".":
+            continue
+        if part == "..":
+            raise ValueError(f"Blocked unsafe NCE path: {path}")
+        parts.append(part)
+    return "/".join(parts)
+
+
+def _nce_join_inner(base_inner: str, target: str) -> str:
+    target = str(target or "").replace("\\", "/")
+    if target.startswith("/"):
+        out = target.lstrip("/")
+    else:
+        b = str(base_inner or "").replace("\\", "/").strip("/")
+        out = (b + "/" + target) if b else target
+    if not out.lower().endswith(".nc"):
+        out += ".nc"
+    return _nce_norm_inner(out)
+
+
+def _nce_make_ref(package_path: str, inner: str = "") -> str:
+    return "nce:" + os.path.abspath(package_path) + "!/" + _nce_norm_inner(inner)
+
+
+def _nce_is_ref(ref: str) -> bool:
+    return str(ref or "").startswith("nce:") and "!/" in str(ref or "")
+
+
+def _nce_parse_ref(ref: str) -> Tuple[str, str]:
+    s = str(ref or "")
+    if not _nce_is_ref(s):
+        raise ValueError(f"Not an NCE ref: {ref}")
+    package, inner = s[4:].split("!/", 1)
+    return os.path.abspath(package), _nce_norm_inner(inner)
+
+
+def _nce_find_entry(files: Dict[str, bytes], requested: Optional[str]) -> str:
+    if requested:
+        req = _nce_norm_inner(requested)
+        if req in files and req.lower().endswith(".nc"):
+            return req
+        raise FileNotFoundError(f"NCE entrypoint not found: {requested}")
+    for name in ("main.nc", "index.nc", "app.nc"):
+        if name in files:
+            return name
+    nc_files = sorted(p for p in files if p.lower().endswith(".nc"))
+    if not nc_files:
+        raise ValueError("NCE package contains no .nc file")
+    return nc_files[0]
+
+
+def create_nce(source: str, output: str, password: Optional[str] = None, entrypoint: Optional[str] = None) -> str:
+    import tarfile
+    import zlib
+    from io import BytesIO
+
+    source_abs = os.path.abspath(source)
+    output_abs = os.path.abspath(output)
+    password = _nce_password(password, prompt=True, confirm=True)
+    if not os.path.exists(source_abs):
+        raise FileNotFoundError(source_abs)
+
+    files_for_entry: Dict[str, bytes] = {}
+    tar_buf = BytesIO()
+    with tarfile.open(fileobj=tar_buf, mode="w") as tar:
+        def add_file(full_path: str, arcname: str) -> None:
+            arc = _nce_norm_inner(arcname)
+            if not arc:
+                return
+            if os.path.abspath(full_path) == output_abs:
+                return
+            if os.path.islink(full_path) or not os.path.isfile(full_path):
+                return
+            with open(full_path, "rb") as f:
+                data = f.read()
+            info = tarfile.TarInfo(arc)
+            info.size = len(data)
+            info.mtime = int(os.path.getmtime(full_path))
+            info.mode = 0o644
+            tar.addfile(info, BytesIO(data))
+            if arc.lower().endswith(".nc"):
+                files_for_entry[arc] = data
+
+        if os.path.isfile(source_abs):
+            add_file(source_abs, os.path.basename(source_abs))
+        else:
+            for root, dirs, names in os.walk(source_abs):
+                dirs[:] = [d for d in dirs if d not in ("__pycache__", ".git", "nc_exe_build")]
+                for name in names:
+                    full = os.path.join(root, name)
+                    arc = os.path.relpath(full, source_abs)
+                    add_file(full, arc)
+
+        selected_entry = _nce_find_entry(files_for_entry, entrypoint)
+        manifest = {
+            "format": "nce",
+            "version": 1,
+            "entrypoint": selected_entry,
+            "created": int(time.time()),
+        }
+        manifest_data = json.dumps(manifest, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        info = tarfile.TarInfo(".nce_manifest.json")
+        info.size = len(manifest_data)
+        info.mtime = int(time.time())
+        info.mode = 0o600
+        tar.addfile(info, BytesIO(manifest_data))
+
+    plain = zlib.compress(tar_buf.getvalue(), level=9)
+    _hashes, AESGCM, _PBKDF2HMAC = _nce_require_crypto()
+    salt = secrets.token_bytes(16)
+    nonce = secrets.token_bytes(12)
+    header = {
+        "version": 1,
+        "cipher": "AES-256-GCM",
+        "kdf": "PBKDF2-HMAC-SHA256",
+        "iterations": _NCE_DEFAULT_ITERATIONS,
+        "salt": salt.hex(),
+        "nonce": nonce.hex(),
+        "compression": "zlib",
+    }
+    header_bytes = json.dumps(header, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    key = _nce_key(password, salt, _NCE_DEFAULT_ITERATIONS)
+    ciphertext = AESGCM(key).encrypt(nonce, plain, _NCE_MAGIC + header_bytes)
+    with open(output_abs, "wb") as f:
+        f.write(_NCE_MAGIC)
+        f.write(len(header_bytes).to_bytes(4, "big"))
+        f.write(header_bytes)
+        f.write(ciphertext)
+    _NCE_CACHE.pop(output_abs, None)
+    return output_abs
+
+
+def _nce_load_package(path: str, policy: Optional[NCPolicy] = None, password: Optional[str] = None) -> Dict[str, Any]:
+    import tarfile
+    import zlib
+    from io import BytesIO
+
+    policy = policy or NCPolicy()
+    abs_path = os.path.abspath(path)
+    st = os.stat(abs_path)
+    password = _nce_password(password, prompt=bool(getattr(sys.stdin, "isatty", lambda: False)()))
+    cache_key = abs_path + ":" + hashlib.sha256(password.encode("utf-8")).hexdigest()
+    cached = _NCE_CACHE.get(cache_key)
+    if cached and cached.get("mtime") == st.st_mtime and cached.get("size") == st.st_size:
+        return cached
+
+    max_bytes = max(int(getattr(policy, "max_module_bytes", 300_000)) * 20, 50_000_000)
+    if st.st_size > max_bytes:
+        raise ValueError(f"Blocked: NCE package too large: {abs_path}")
+    with open(abs_path, "rb") as f:
+        data = f.read()
+    if not data.startswith(_NCE_MAGIC):
+        raise ValueError(f"Not an NCE package: {abs_path}")
+    pos = len(_NCE_MAGIC)
+    header_len = int.from_bytes(data[pos:pos + 4], "big")
+    pos += 4
+    if header_len <= 0 or header_len > 64_000:
+        raise ValueError("Invalid NCE header")
+    header_bytes = data[pos:pos + header_len]
+    pos += header_len
+    header = json.loads(header_bytes.decode("utf-8"))
+    salt = bytes.fromhex(str(header.get("salt", "")))
+    nonce = bytes.fromhex(str(header.get("nonce", "")))
+    iterations = int(header.get("iterations", _NCE_DEFAULT_ITERATIONS))
+    _hashes, AESGCM, _PBKDF2HMAC = _nce_require_crypto()
+    key = _nce_key(password, salt, iterations)
+    try:
+        compressed = AESGCM(key).decrypt(nonce, data[pos:], _NCE_MAGIC + header_bytes)
+    except Exception as e:
+        raise ValueError("NCE decrypt failed: wrong password or damaged package") from e
+    tar_data = zlib.decompress(compressed)
+
+    files: Dict[str, bytes] = {}
+    with tarfile.open(fileobj=BytesIO(tar_data), mode="r:") as tar:
+        for member in tar.getmembers():
+            inner = _nce_norm_inner(member.name)
+            if not inner or not member.isfile():
+                continue
+            extracted = tar.extractfile(member)
+            if extracted is None:
+                continue
+            files[inner] = extracted.read()
+
+    manifest = {}
+    if ".nce_manifest.json" in files:
+        try:
+            manifest = json.loads(files[".nce_manifest.json"].decode("utf-8", errors="replace"))
+        except Exception:
+            manifest = {}
+    entrypoint = _nce_find_entry(files, manifest.get("entrypoint"))
+    loaded = {
+        "path": abs_path,
+        "mtime": st.st_mtime,
+        "size": st.st_size,
+        "files": files,
+        "entrypoint": entrypoint,
+        "manifest": manifest,
+    }
+    _NCE_CACHE[cache_key] = loaded
+    return loaded
+
+
+def nce_read_entry_text(path: str, policy: Optional[NCPolicy] = None, password: Optional[str] = None) -> Tuple[str, str, str]:
+    package = _nce_load_package(path, policy=policy, password=password)
+    entry = package["entrypoint"]
+    data = package["files"][entry]
+    if len(data) > int((policy or NCPolicy()).max_module_bytes):
+        raise ValueError(f"Blocked: module too large inside NCE: {entry}")
+    ref = _nce_make_ref(package["path"], entry)
+    base = _nce_make_ref(package["path"], os.path.dirname(entry))
+    return data.decode("utf-8", errors="replace"), base, ref
+
+
+def nce_list_files(path: str, policy: Optional[NCPolicy] = None, password: Optional[str] = None) -> List[str]:
+    package = _nce_load_package(path, policy=policy, password=password)
+    return sorted(k for k in package["files"].keys() if k != ".nce_manifest.json")
+
+
+def _nce_read_file_text(path: str, policy: NCPolicy) -> str:
+    if _nce_is_ref(path):
+        package_path, inner = _nce_parse_ref(path)
+        package = _nce_load_package(package_path, policy=policy)
+        data = package["files"].get(inner)
+        if data is None:
+            raise FileNotFoundError(path)
+        if len(data) > policy.max_module_bytes:
+            raise ValueError(f"Blocked: module too large inside NCE: {inner}")
+        return data.decode("utf-8", errors="replace")
+    return _NCE_ORIG_READ_FILE_TEXT(path, policy)
+
+
+def _nce_resolve_ref(base: str, name_or_path: str) -> str:
+    base_s = str(base or "")
+    target = str(name_or_path or "")
+    if _nce_is_ref(base_s):
+        package_path, inner_base = _nce_parse_ref(base_s)
+        inner = _nce_join_inner(inner_base, target)
+        return _nce_make_ref(package_path, inner)
+    return _NCE_ORIG_RESOLVE_REF(base, name_or_path)
+
+
+def _nce_load_from(self, src: str, name: str, base: str, extra_paths=None, depth: int = 0, caller_source: str = "<text>", caller_line: int = 1):
+    if not _nce_is_ref(base):
+        return _NCE_ORIG_LOAD_FROM(self, src, name, base, extra_paths, depth, caller_source, caller_line)
+    if depth > self.policy.max_import_depth:
+        raise NCError(_format_source(caller_source), caller_line, "NC blocked: import depth exceeded", self._import_stack)
+    package_path, inner_base = _nce_parse_ref(base)
+    src_inner = _nce_norm_inner((inner_base.rstrip("/") + "/" + src).strip("/"))
+    ref = _nce_make_ref(package_path, _nce_join_inner(src_inner, name))
+    key = f"from:{ref}"
+    if key in self.module_cache:
+        return self.module_cache[key]
+    text = _nce_read_file_text(ref, self.policy)
+    module = NCModule(name)
+    self.module_cache[key] = module
+    parser = NCParser(text, source_name=str(ref))
+    stmts = parser.parse()
+    if parser.errors:
+        err = NCMultiError(parser.errors, header="NC parse errors")
+        raise err
+    export_names: List[str] = []
+    env = self.base_env()
+    env["__module__"] = module
+    env["__exports__"] = export_names
+    env["__export_base_keys__"] = set(env.keys())
+    new_base = _nce_make_ref(package_path, os.path.dirname(_nce_parse_ref(ref)[1]))
+    with self._with_source(str(ref), push_stack=True):
+        self.exec_block(stmts, env, base_dir=new_base, extra_paths=extra_paths, in_module=True, source_name=str(ref))
+    module.namespace = {k: v for k, v in env.items() if not k.startswith("__")}
+    module.finalize_exports(export_names)
+    return module
+
+
+def _nce_run_file(path: str, policy=None, enable_ui: bool = True, extra_paths=None):
+    policy = policy or NCPolicy()
+    if str(path).lower().endswith(".nce"):
+        text, base, source_name = nce_read_entry_text(path, policy=policy)
+        return run_text(text, base=base, extra_paths=extra_paths, policy=policy, enable_ui=enable_ui, source_name=source_name)
+    return _NCE_ORIG_RUN_FILE(path, policy=policy, enable_ui=enable_ui, extra_paths=extra_paths)
+
+
+def _nce_base_env(self):
+    env = _NCE_ORIG_BASE_ENV(self)
+
+    class _NCEMod:
+        pass
+
+    mod = _NCEMod()
+
+    @_nc_callable
+    def list_files(path):
+        return nce_list_files(str(path), policy=self.policy)
+
+    @_nc_callable
+    def entry(path):
+        package = _nce_load_package(str(path), policy=self.policy)
+        return str(package.get("entrypoint") or "")
+
+    mod.list_files = list_files
+    mod.entry = entry
+    env["nce"] = mod
+    return env
+
+
+_read_file_text = _nce_read_file_text
+_resolve_ref = _nce_resolve_ref
+NCInterpreter.load_from = _nce_load_from
+NCInterpreter.base_env = _nce_base_env
+run_file = _nce_run_file
