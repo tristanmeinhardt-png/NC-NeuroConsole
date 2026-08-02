@@ -70,7 +70,7 @@ class Style:
 
 @dataclass
 class WindowConfig:
-    title: str = "Fenster"
+    title: str = "Window"
     icon: str = "T"
     x: int = -1
     y: int = -1
@@ -101,7 +101,7 @@ class Tk:
     def set_random_seed(self, seed: Optional[int] = None):
         self._rng = random.Random(seed)
 
-    def Toplevel(self, title: str = "Fenster", icon: str = "T") -> "Toplevel":
+    def Toplevel(self, title: str = "Window", icon: str = "T") -> "Toplevel":
         w = Toplevel(root=self, title=title, icon=icon)
         self._windows.append(w)
         return w
@@ -120,7 +120,7 @@ class Tk:
     run = mainloop
 
 class Toplevel:
-    def __init__(self, root: Optional[Tk], title: str = "Fenster", icon: str = "T"):
+    def __init__(self, root: Optional[Tk], title: str = "Window", icon: str = "T"):
         self.root = root
         self.cfg = WindowConfig(title=title, icon=icon)
         self._widgets: List[_Widget] = []
@@ -432,7 +432,7 @@ class Table(_Widget):
 
 # ---------- convenience API ----------
 
-def create_window(title: str = "Fenster", html: str = "<p>Leer</p>", w: int = 900, h: int = 600,
+def create_window(title: str = "Window", html: str = "<p>Empty</p>", w: int = 900, h: int = 600,
                   x: int = -1, y: int = -1, icon: str = "T", style: Optional[dict] = None,
                   fullscreen: bool = False):
     _emit({
