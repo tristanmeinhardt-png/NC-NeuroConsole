@@ -1,1079 +1,426 @@
-# NC (NeuroConsole)
+# NeuroConsole (NC)
+
+> A readable, indentation-based programming language for console programs,
+> desktop interfaces, real-world physics simulations, local tools, and web
+> endpoints.
+
+**Current release:** `1.2.0-alpha.1` (Alpha 1)  
+**Runtime requirement:** 64-bit Python 3.12 or newer  
+**Supported systems:** Windows 10/11, current Linux distributions, and current
+macOS releases
+
+> [!WARNING]
+> NC 1.2.0 is an alpha release. Keep backups of important projects and report
+> reproducible problems. The physics system is intended for games, learning,
+> and general simulation—not safety-critical or engineering certification.
 
 ## What is NC?
 
-NC (NeuroConsole) is a scripting language that runs on top of Python and is designed to make console programs easier to write, easier to read, and faster to prototype.
+NeuroConsole, or NC, is a small programming language and runtime focused on
+clear source code, helpful errors, and practical built-in capabilities. NC uses
+two-space indentation, forbids tabs, and keeps common language constructs
+compact:
 
-NC uses `.nc` files as source files. These files are executed by the NC interpreter (`nc.py`) and the command-line launcher (`nc_console.py`). The project also includes an NC HTTP server (`nc_server.py`) and a GUI/TWIN host (`nc_twin_run.py`).
+```nc
+let total = 0
 
-NC is focused on:
+for value in range(1, 5):
+  set total = total + value
 
-- simple syntax
-- readable commands
-- quick scripting
-- reusable functions
-- repeat blocks
-- console UI elements
-- optional GUI/TWIN output
-- optional EXE export
-- Windows-oriented workflows
-- AI programming
+fn double(value):
+  ret value * 2
 
----
+if total == 10:
+  print double(total)
+else:
+  print "Unexpected result"
+```
 
-# Why should I use NC?
+NC 1.2 adds three major runtime systems without changing the existing language
+grammar:
 
-## NC is a simple scripting language built on Python that makes console apps easier to write, read, and share.
+- `physics2d` for fixed-step 2D rigid-body simulation
+- `physics3d` for fixed-step 3D rigid bodies and dedicated cloth physics
+- `ui.app` for event-driven desktop applications written directly in NC
 
-### Think of NC as:
+It also introduces structured English diagnostics and installers for Windows,
+Linux, and macOS.
 
-- simpler Python for CLI apps
-- scripting language with built-in UI elements
-- fast prototyping language
-- beginner-friendly syntax
+## Highlights
 
----
+| Area | Current capabilities |
+|---|---|
+| Language | Variables, conditions, loops, functions, lists, dictionaries, modules, imports, exports, and safe expression evaluation |
+| 2D physics | Circles, boxes, convex polygons, forces, impulses, torque, friction, restitution, drag, joints, and custom force rules |
+| 3D physics | Spheres, boxes, planes, forces, impulses, torque, friction, restitution, drag, joints, and visual 3D models |
+| Cloth | Structural, shear, and bending constraints; pins, damping, wind, rigid-body collision, and image textures |
+| Desktop UI | Windows, layouts, text, buttons, inputs, checkboxes, choices, sliders, progress bars, images, tables, canvas, timers, and callbacks |
+| Diagnostics | Stable error codes, source excerpts, column markers, help text, related errors, import chains, and NC call stacks |
+| Tools | `nc` console runner, `ncw` graphical runner, learn mode, encrypted NCE packages, and standalone executable builds |
 
-## Windows only
+Large optional systems are loaded lazily. A console-only or headless physics
+program does not need to open a window or initialize a renderer.
 
-NC is currently intended for Windows only.
+## Quick start
 
-Typical directory example:
+### 1. Install Python
+
+Install a **64-bit Python 3.12 or newer** build before installing NC.
+
+### 2. Run the installer
+
+Download or clone this repository, open its root folder, and use the installer
+for your platform:
+
+| Platform | Command or file |
+|---|---|
+| Windows | Run `install_nc.cmd` or `install_nc.bat` |
+| Linux | `chmod +x install_nc.sh && ./install_nc.sh` |
+| macOS | Double-click `Install_NC.command`, or run it from Terminal |
+
+The installer:
+
+- installs NC into `~/NC`;
+- creates an isolated environment in `~/NC/.venv`;
+- installs the required Python packages;
+- adds the `nc` and `ncw` commands to the user PATH;
+- preserves existing files inside `~/NC/standart_imports`; and
+- runs a physics self-test after installation.
+
+The folder name `standart_imports` is retained for backward compatibility.
+
+Open a new terminal after installation and verify NC:
+
+```console
+nc --version
+```
+
+Expected output:
 
 ```text
-C:\Users\(Your name)\NC\
+NC 1.2.0-alpha.1
 ```
 
-Why:
+### 3. Run your first program
 
-- the interpreter is configured around a Windows default imports path
-- the CLI workflow is built around Windows usage
-- EXE export is Windows-focused
-- surrounding tools use Windows-style paths and environments
-
-Other operating systems may work partially, but they are not the target platform.
-
----
-
-## Main project files
-
-- `nc.py` → main interpreter
-- `nc_console.py` → command-line launcher and EXE export
-- `nc_server.py` → HTTP server that runs NC files
-- `nc_twin_run.py` → GUI/TWIN host for windows, tables, plots, and HTML output
-- `t_windows.py` → TWIN / window message helper
-
----
-
-## Python requirements
-
-### Minimum
-
-For the basic interpreter, NC mainly relies on Python's standard library.
-
-Recommended Python version:
-
-- Python 3.10 or newer
-
-### Optional but recommended modules
-
-Install these for the full NC experience:
-
-```bash
-pip install pyinstaller PySide6 PySide6-QtWebEngine
-```
-
-### What they are used for
-
-- `pyinstaller` → export `.nc` files as Windows `.exe` files
-- `PySide6` → GUI window support in `nc_twin_run.py`
-- `PySide6-QtWebEngine` → HTML/JS rendering support in GUI windows
-
-If you only want the basic console language and do not need GUI output or EXE export, Python alone may already be enough for large parts of NC.
-
----
-
-## Running NC
-
-Run a local NC file:
-
-```bash
-python nc_console.py my_program.nc
-```
-
-If you have a wrapper or alias installed, this may also work:
-
-```bash
-nc my_program.nc
-```
-
-Run an NC file from a URL:
-
-```bash
-nc https://example.com/test.nc
-```
-
-### CLI options
-
-NC also supports additional CLI options:
-
-```bash
-nc my_program.nc --base C:\Users\meinh\NC
-nc my_program.nc --libs C:\Users\meinh\NC\libs
-nc my_program.nc --allow-http
-nc my_program.nc --allow-private
-```
-
-What they do:
-
-- `--base` → sets the base folder or URL directory for imports
-- `--libs` → adds additional search paths for imports
-- `--allow-http` → allows insecure HTTP imports and URLs
-- `--allow-private` → allows private or localhost hosts
-
-### Important for buttons and checkmarks
-
-Buttons are shown best in a real interactive terminal such as normal Windows CMD or PowerShell.
-
-If NC is started in a non-interactive environment, button rendering may not be shown properly.
-
----
-
-## EXE export
-
-You can build a Windows executable from a local `.nc` file:
-
-```bash
-python nc_console.py my_program.nc --exe
-```
-
-For GUI/TWIN programs you can also use:
-
-```bash
-python nc_twin_run.py my_program.nc --exe
-```
-
-This feature requires `pyinstaller`.
-
----
-
-# New in this version
-
-This version adds several quality-of-life features for console apps, menus, reusable code, and GUI output.
-
-## 1. Input without parentheses
-
-Both styles work:
+Create `hello.nc`:
 
 ```nc
-let name = input("What is your name?")
-```
-
-```nc
-let name = input "What is your name?"
-```
-
-## 2. Better `+` string concatenation
-
-This works well even with mixed values:
-
-```nc
-let name = input "What is your name?"
+let name = "world"
 print "Hello, " + name + "!"
 ```
 
-## 3. `end` keyword
+Run it with:
 
-`end` closes the current NC run immediately.
-
-```nc
-print "Hello"
-end
-print "This will not run"
+```console
+nc hello.nc
 ```
 
-## 4. `end` can be aliased
+Use `ncw` for programs that open graphical NC windows:
 
-```nc
-end = ending
-
-button "Exit":
-  action:
-    ending
+```console
+ncw examples/ui_counter.nc
 ```
 
-## 5. Button keyword variants
+## Real-world physics in SI units
 
-NC accepts all of these button keywords:
+NC physics separates the simulation from its visual representation. A body's
+size, mass, velocity, and collision shape use physical units; pixels, textures,
+and model coordinates are renderer details. Resizing a window therefore does
+not change gravity or collision behavior.
 
-```nc
-button "Play":
-  action:
-    print "Starting"
-```
+| Quantity | Unit |
+|---|---|
+| Position and size | metre (`m`) |
+| Time | second (`s`) |
+| Mass | kilogram (`kg`) |
+| Force | newton (`N`) |
+| Torque | newton-metre (`N m`) |
+| Impulse | newton-second (`N s`) |
+| Linear velocity | metre per second (`m/s`) |
+| Angles | radians (`rad`) |
 
-```nc
-botton "Play":
-  action:
-    print "Starting"
-```
+Standard gravity defaults to exactly `9.80665 m/s²`. The simulation uses a
+fixed physics step that is independent of display frame rate. With the same
+platform, Python build, starting state, callbacks, and step sequence, the
+headless solvers are deterministic.
 
-```nc
-knopf "Play":
-  action:
-    print "Starting"
-```
+No finite floating-point simulation can reproduce the real world with literal
+100% mathematical accuracy. NC instead provides controlled, repeatable
+classical mechanics whose accuracy can be adjusted through the fixed step,
+solver iterations, collision approximation, and material parameters.
 
-For documentation and examples, `button` is recommended as the standard spelling.
-
-## 6. `repeat (function) N times`
-
-NC supports directly repeating a callable action:
-
-```nc
-fn ping():
-  print "hi"
-
-repeat (ping) 5 times
-```
-
-This also works without parentheses for simple names:
+### Physics 2D
 
 ```nc
-repeat ping 3 times
-```
-
-## 7. `repeat --all N times`
-
-NC can repeat the whole top-level program:
-
-```nc
-repeat --all 3 times
-```
-
-You can also write:
-
-```nc
-repeat --all (3) times
-```
-
-## 8. `export --all`
-
-Inside modules you can export everything at once:
-
-```nc
-export --all
-```
-
-## 9. `from "...“ import ... as ...`
-
-NC supports path-based imports with optional aliasing:
-
-```nc
-from "libs" import tools
-from "libs" import tools as helper
-```
-
-## 10. `return` and `ret`
-
-Both forms are accepted inside functions:
-
-```nc
-fn add():
-  ret 5
-```
-
-```nc
-fn add():
-  return 5
-```
-
-## 11. `break` and `continue`
-
-Loop control keywords are supported:
-
-```nc
-break
-continue
-```
-
-## 12. More color keyword variants
-
-NC supports additional text color names:
-
-- `textcolor`
-- `textcollor`
-- `textcolour`
-- `fontcolor`
-- `printcolor`
-
-Example:
-
-```nc
-fontcolor red
-print "Hello"
-```
-
-Global text color:
-
-```nc
-printcolor --all blue
-print "Everything is blue"
-```
-
----
-
-# Complete NC learning guide
-
-## 1. Print text
-
-```nc
-print "Hello world"
-print "NC is simple"
-print "NC is readable"
-```
-
-NC can also print multiple values:
-
-```nc
-print "Score:", 10, "Lives:", 3
-```
-
-## 2. Variables
-
-Use `let` for a new variable and `set` for an existing variable.
-
-```nc
-let x = 5
-let name = "Alex"
-let enabled = True
-
-print x
-print name
-print enabled
-```
-
-Change an existing variable:
-
-```nc
-let score = 0
-set score = score + 1
-print score
-```
-
-## 3. Functions
-
-```nc
-fn hello():
-  print "Hello"
-
-hello()
-```
-
-Multi-line example:
-
-```nc
-fn greet():
-  print "Hello user"
-  print "Welcome to NC"
-
-greet()
-```
-
-Returning values:
-
-```nc
-fn get_name():
-  return "Alex"
-```
-
-or:
-
-```nc
-fn get_name():
-  ret "Alex"
-```
-
-## 4. Repeat blocks
-
-```nc
-repeat 3:
-  print "Hello"
-```
-
-## 5. Repeating functions directly
-
-```nc
-fn ping():
-  print "hi"
-
-repeat (ping) 3 times
-```
-
-## 6. Repeat the whole program
-
-```nc
-print "This whole file repeats"
-repeat --all 2 times
-```
-
-## 7. Aliases
-
-```nc
-repeat = again
-
-again 3:
-  print "Hi"
-```
-
-You can also alias `times` and similar words if your NC setup defines them:
-
-```nc
-repeat = wiederhole
-times = mal
-
-wiederhole (ping) 2 mal
-```
-
-## 8. Conditions
-
-```nc
-let x = 5
-let enabled = True
-
-if x == 5:
-  print "x is 5"
-else:
-  print "x is not 5"
-
-if enabled:
-  print "enabled"
-else:
-  print "disabled"
-```
-
-## 9. `when` as a simpler alias
-
-```nc
-when x == 10:
-  print "ten"
-else:
-  print "not ten"
-```
-
-## 10. Buttons
-
-Inside a button block, action code must be placed inside `action:`.
-
-Correct example:
-
-```nc
-button "Start":
-  action:
-    print "Starting"
-
-button "Exit":
-  action:
-    end
-```
-
-Buttons can be selected with arrow keys and activated with Enter.
-
-Menu example:
-
-```nc
-print "Main menu"
-
-button "Play":
-  action:
-    print "Game starting..."
-
-button "Settings":
-  action:
-    print "Opening settings..."
-
-button "Exit":
-  action:
-    end
-```
-
-### Button colors
-
-```nc
-button "Play":
-  color "green"
-  action:
-    print "Starting"
-```
-
-### Global button color
-
-```nc
-color --all "cyan"
-```
-
-## 11. Checkmarks
-
-Basic example:
-
-```nc
-(sound) = checkmark "Sound"
-(music) = checkmark "Music"
-
-if sound:
-  print "Sound is enabled"
-else:
-  print "Sound is disabled"
-
-if music:
-  print "Music is enabled"
-else:
-  print "Music is disabled"
-```
-
-Color example:
-
-```nc
-(sound) = checkmark "Sound" color "green"
-```
-
-Alias example:
-
-```nc
-tick = checkmark
-(music) = tick "Music"
-```
-
-Alternative accepted names include:
-
-- `checkmark`
-- `checkbox`
-- `check`
-- `haken`
-- `haekchen`
-- `häckchen`
-
-### `is on` / `is off`
-
-```nc
-if sound is on:
-  print "Sound is enabled"
-else:
-  print "Sound is disabled"
-```
-
-If you want the most stable and simple form, prefer this:
-
-```nc
-if sound:
-  print "Sound is enabled"
-else:
-  print "Sound is disabled"
-```
-
-## 12. Colors
-
-```nc
-textcolor red
-print "Red text"
-```
-
-```nc
-textcolor --all blue
-print "Everything is blue"
-```
-
-Alternative text color spellings also work:
-
-```nc
-fontcolor green
-print "Green text"
-
-printcolor --all yellow
-```
-
-## 13. Input
-
-Classic call style:
-
-```nc
-let name = input("What is your name?")
-print name
-```
-
-Short style:
-
-```nc
-let name = input "What is your name?"
-print "Hello, " + name + "!"
-```
-
-## 14. Imports
-
-NC contains built-in placeholder modules such as `ui`, `math`, and `json`.
-
-```nc
-import math
-print math.pi
-
-import json
-```
-
-NC also supports importing from a specific base path:
-
-```nc
-from "libs" import tools
-from "libs" import tools as helper
-```
-
-## 15. Exporting from modules
-
-Single export:
-
-```nc
-export hello
-export run
-```
-
-Export everything:
-
-```nc
-export --all
-```
-
-## 16. Saving and loading data
-
-Use the `json` module.
-
-### Save example
-
-```nc
-import json
-
-json.save("my_settings", {
-  "sound": sound,
-  "music": music,
-  "hardmode": hardmode
+import physics2d
+
+let world = physics2d.world({
+  "gravity": [0, -9.80665],
+  "fixed_step": 0.008333333333333333,
+  "solver_iterations": 10
 })
+
+let floor = world.static_box(18, 1, [0, -4], {
+  "color": "#475569",
+  "material": {"friction": 0.8, "restitution": 0.05}
+})
+
+let ball = world.circle(0.55, 1.2, [-1.5, 3], {
+  "color": "#38bdf8",
+  "material": {"friction": 0.45, "restitution": 0.72}
+})
+
+let app = physics2d.app(world, {
+  "title": "NC Real Physics 2D",
+  "width": 1100,
+  "height": 720,
+  "pixels_per_metre": 75
+})
+
+app.run()
 ```
 
-### Load example
+Run the complete example:
+
+```console
+ncw examples/physics2d_balls.nc
+```
+
+### Physics 3D and cloth
 
 ```nc
-import json
+import physics3d
 
-let data = json.load("my_settings", {})
+let world = physics3d.world({
+  "gravity": [0, 0, -9.80665],
+  "fixed_step": 0.008333333333333333
+})
 
-if data["sound"]:
-  print "Saved sound was ON"
-else:
-  print "Saved sound was OFF"
+let ground = world.plane([0, 0, 1], 0)
+let pole = world.static_box([0.18, 0.18, 5], [-2.1, 0, 2.5])
+
+let flag = world.cloth({
+  "columns": 24,
+  "rows": 15,
+  "size": [3.8, 2.2],
+  "origin": [-2, 0, 4.8],
+  "orientation": "vertical",
+  "pinned": "top",
+  "mass": 0.9,
+  "wind": [0, 5.5, 0.4],
+  "structural_stiffness": 0.96,
+  "shear_stiffness": 0.82,
+  "bend_stiffness": 0.3
+})
+
+let app = physics3d.app(world, {
+  "title": "NC 3D Cloth Physics",
+  "camera_position": [8, -12, 7],
+  "camera_target": [0, 0, 2.3]
+})
+
+app.run()
 ```
 
-## 17. Flow control
+Run the complete example:
 
-NC supports `break`, `continue`, and `end`.
+```console
+ncw examples/physics3d_cloth.nc
+```
+
+This release implements **cloth surfaces only**. It intentionally does not
+provide liquids, gases, or general-purpose soft bodies.
+
+### Images, models, and collision geometry
+
+| System | Visual resources |
+|---|---|
+| `physics2d` | PNG, JPG/JPEG, WebP, and SVG images |
+| `physics3d` | GLB, glTF, and OBJ models |
+| 3D cloth | Image textures |
+
+Visual resources never silently become collision geometry. A detailed crate
+model can use a stable box collider, and a circular 2D collider can use a
+high-resolution image. This keeps rendering changes from unexpectedly changing
+physical behavior.
+
+Custom behavior can be added with `add_force_rule`, `on_fixed_step`, and
+`on_collision` callbacks. See [PHYSICS_API.md](PHYSICS_API.md) for the complete
+Alpha 1 API.
+
+## Build desktop interfaces with `ui.app`
+
+`ui.app` creates ordinary event-driven application windows directly from NC.
+Callbacks execute in the NC process, and PySide6 is loaded only when
+`app.run()` starts the graphical renderer.
 
 ```nc
-break
-continue
-end
+import ui
+
+let app = ui.app("NC Counter")
+let window = app.window("NC Counter", 520, 300)
+let output = window.text("0", {
+  "style": {"font_size": 38, "color": "#38bdf8"}
+})
+
+let controls = window.row()
+let add_button = controls.button("Add 1")
+let reset_button = controls.button("Reset")
+
+fn add_one():
+  output.set_text(str(int(output.text()) + 1))
+
+fn reset():
+  output.set_text("0")
+
+add_button.on_click(add_one)
+reset_button.on_click(reset)
+app.run()
 ```
 
-## 18. GUI / TWIN output
+Run it with:
 
-NC can also produce structured GUI-style output through `__TWIN__` messages.
-
-The GUI host can render:
-
-- windows
-- tables
-- plots
-- HTML content
-- CSS and JavaScript in GUI windows
-- TWIN / `t_windows` style messages
-
-### JavaScript bridge
-
-In HTML-based GUI windows, JavaScript can send messages back to the log output:
-
-```js
-ncSend("hello")
+```console
+ncw examples/ui_counter.nc
 ```
 
-### HTML eval support
+See [UI_APP_API.md](UI_APP_API.md) for widgets, layouts, styles, timers, canvas
+commands, state updates, and event callbacks.
 
-The GUI host also supports commands such as:
+## Structured diagnostics
 
-- `html.eval`
-- `js.eval`
-
-This allows dynamic JavaScript execution in the loaded HTML window.
-
-## 19. `t_windows.py` helper API
-
-NC projects can also use the TWIN helper module for structured window creation.
-
-Concepts include:
-
-- `Tk`
-- `Toplevel`
-- window geometry
-- fullscreen windows
-- custom window style
-- direct HTML content
-
-## 20. NC server mode
-
-`nc_server.py` can run NC files as lightweight web handlers.
-
-It can:
-
-- map HTTP requests to NC files
-- inject request data into NC code
-- capture NC output
-- return HTTP metadata and body content
-- answer CORS preflight requests
-- serve dynamic responses based on request data
-
-Inside the executed NC file, a request object is injected automatically:
-
-```nc
-print request["method"]
-print request["path"]
-```
-
-NC server handlers can also return HTTP metadata through a special first output line using `__HTTP__`.
-
----
-
-# Step-by-step tutorial
-
-## Step 1: Your first NC file
-
-Create a file called:
+Normal NC errors are written in English and show the location, the actual
+source line, a stable error code, and a useful correction where possible:
 
 ```text
-hello.nc
+error NC-S1001: Missing ':' after if block header
+  --> game.nc:12:16
+   |
+12 | if player.alive
+   |                ^ expected ':'
+13 |   player.move()
+   |   ^ This indentation diagnostic is a consequence of the missing ':'.
+   = help: Write `if player.alive:`
 ```
 
-Content:
+Related parser errors are connected to their cause instead of being presented
+as unrelated mistakes. Runtime errors can include the NC function call stack,
+and imported files can include an import chain. Python tracebacks are not shown
+during normal execution.
 
-```nc
-print "Hello world"
+Diagnostic families are documented in [DIAGNOSTICS.md](DIAGNOSTICS.md).
+
+## Command-line overview
+
+| Command | Purpose |
+|---|---|
+| `nc program.nc` | Run an NC program in the console host |
+| `ncw program.nc` | Run an NC program with the graphical host |
+| `nc --version` | Print the installed NC version |
+| `nc --learn` | Open the built-in learn mode |
+| `nc program.nc --exe` | Build a local NC program as a standalone executable with PyInstaller |
+| `nc --pack-nce SOURCE OUTPUT` | Create an encrypted `.nce` package |
+| `nc package.nce` | Run an encrypted `.nce` package |
+| `nc program.nc --libs PATH` | Add a module search directory |
+
+HTTPS imports are permitted by policy. Plain HTTP and private/localhost URL
+imports require explicit CLI options. Private attribute access is blocked by
+the expression evaluator. These controls reduce accidental exposure, but NC
+must not be treated as a complete sandbox for hostile programs.
+
+## Platform support
+
+| Platform | Full Alpha 1 support | Installer |
+|---|---:|---|
+| Windows 10/11 | Yes | `.cmd` and `.bat` |
+| Current Linux distributions | Yes | `.sh` |
+| Current macOS releases | Yes | `.command` |
+| Windows Vista, 7, 8, and 8.1 | No | Not compatible with the Python 3.12 and Qt 6 runtime |
+
+The `.bat` installer is an alternative Windows command-script format; it does
+not make modern Python or Qt compatible with unsupported Windows releases.
+More installation details and custom target options are available in
+[INSTALLING.md](INSTALLING.md).
+
+## Architecture
+
+```mermaid
+flowchart TD
+  A["NC source"] --> B["Parser and statement representation"]
+  B --> C["Safe expression analysis"]
+  C --> D["Interpreter"]
+  D --> E["Lazy native runtime modules"]
+  E --> F["Console, UI, physics, or external output"]
 ```
 
-Run it:
+Physics and direct UI are ordinary built-in modules rather than special syntax.
+This keeps the parser stable and lets the runtime systems evolve behind a
+consistent NC API.
 
-```bash
-python nc_console.py hello.nc
+| Component | Responsibility |
+|---|---|
+| `nc.py` | Existing language parser, interpreter, policy, and compatibility core |
+| `nc_module_registry.py` | Lazy discovery of native built-in modules |
+| `nc_runtime_support.py` | Validation, vectors, callbacks, resources, and fixed-step timing |
+| `nc_physics2d.py` | Headless 2D physics state and solver |
+| `nc_physics2d_app.py` | PySide6 2D renderer and input |
+| `nc_physics3d.py` | Headless 3D rigid-body and cloth solver |
+| `nc_physics3d_app.py` | Panda3D renderer and 3D model loading |
+| `nc_ui_app.py` | Event-driven UI model and lazy Qt adapter |
+| `nc_diagnostics.py` | Source registry, error classification, relations, and formatting |
+
+See [ARCHITECTURE.md](ARCHITECTURE.md) for design and compatibility details.
+
+## Alpha 1 boundaries
+
+The following limitations are deliberate and documented:
+
+- 2D polygon colliders must be convex.
+- Built-in 3D box collision is currently axis-aligned. Boxes may rotate
+  visually and keep angular state, but collision remains axis-aligned.
+- Cloth receives collisions and movement from rigid bodies, but it does not yet
+  transfer equal-and-opposite momentum back to them.
+- Cloth is the only deformable-material system. Liquids, gases, and generic
+  soft bodies are not included.
+- Physical results depend on the fixed step, solver iterations, collision
+  shapes, material parameters, and floating-point behavior.
+- The full Python 3.12, PySide6, and Panda3D distribution does not support
+  Windows Vista through Windows 8.1.
+
+These constraints are kept explicit so a numerical approximation is never
+mistaken for a feature the runtime does not actually implement.
+
+## Development and tests
+
+Run the complete headless test suite from the repository root:
+
+```console
+python -m unittest discover -s tests -v
 ```
 
-## Step 2: Use variables
-
-```nc
-let name = "Chris"
-print name
-```
-
-## Step 3: Use functions
-
-```nc
-fn greet():
-  print "Hello user"
-
-greet()
-```
-
-## Step 4: Repeat actions
-
-```nc
-repeat 3:
-  print "Repeat works"
-```
-
-## Step 5: Repeat a function directly
-
-```nc
-fn ping():
-  print "hi"
-
-repeat (ping) 3 times
-```
-
-## Step 6: Use conditions
-
-```nc
-let x = 5
-
-if x == 5:
-  print "Correct"
-else:
-  print "Wrong"
-```
-
-## Step 7: Create your first menu
-
-```nc
-print "Main menu"
-
-button "Play":
-  action:
-    print "Starting game"
-
-button "Settings":
-  action:
-    print "Opening settings"
-
-button "Exit":
-  action:
-    end
-```
-
-## 8. Add checkmarks
-
-```nc
-(sound) = checkmark "Sound" color "green"
-(music) = checkmark "Music" color "cyan"
-
-button "Continue":
-  action:
-    if sound:
-      print "Sound is on"
-    else:
-      print "Sound is off"
-```
-
-## Step 9: Ask the user for a name
-
-```nc
-button "Say hello":
-  action:
-    let name = input "What is your name?"
-    print "Hello, " + name + "!"
-```
-
-## Step 10: Exit cleanly
-
-```nc
-button "Exit":
-  action:
-    end
-```
-
-## Step 11: Export your program
-
-```bash
-python nc_console.py my_game.nc --exe
-```
-
----
-
-# Example programs in NC
-
-## 1. Hello menu
-
-```nc
-print "Hello!"
-
-button "Hello back!":
-  action:
-    print "Thanks!"
-    let name = input "What is your name?"
-    print "Nice to meet you, " + name + "!"
-
-button "Exit":
-  action:
-    end
-```
-
-## 2. Number guessing game
-
-```nc
-print "Guess the number"
-
-let target = 7
-
-button "Guess 5":
-  action:
-    if 5 == target:
-      print "Correct"
-    else:
-      print "Wrong"
-
-button "Guess 7":
-  action:
-    if 7 == target:
-      print "Correct"
-    else:
-      print "Wrong"
-
-button "Exit":
-  action:
-    end
-```
-
-## 3. Simple adventure menu
-
-```nc
-print "Adventure"
-
-button "Go left":
-  action:
-    print "You entered a dark forest"
-
-button "Go right":
-  action:
-    print "You found a river"
-
-button "Stay":
-  action:
-    print "Nothing happens"
-
-button "Exit":
-  action:
-    end
-```
-
-## 4. Settings menu game
-
-```nc
-import json
-
-(sound) = checkmark "Sound" color "green"
-(music) = checkmark "Music" color "yellow"
-(hardmode) = checkmark "Hard Mode" color "red"
-
-fn save_settings():
-  json.save("settings", {
-    "sound": sound,
-    "music": music,
-    "hardmode": hardmode
-  })
-  print "Saved"
-
-button "Start Game":
-  action:
-    if hardmode:
-      print "Hard mode enabled"
-    else:
-      print "Normal mode enabled"
-
-button "Save Settings":
-  action:
-    save_settings()
-
-button "Exit":
-  action:
-    end
-```
-
-## 5. Module export example
-
-```nc
-fn hello():
-  print "Hello"
-
-fn bye():
-  print "Bye"
-
-export --all
-```
-
-## 6. Repeat function example
-
-```nc
-fn ping():
-  print "hi"
-
-repeat (ping) 5 times
-```
-
----
-
-# Big demo file
-
-```nc
-import json
-
-print "Welcome to NC Demo"
-
-let data = json.load("demo_settings", {})
-let sound = False
-let music = False
-let hardmode = False
-
-if "sound" in data:
-  set sound = data["sound"]
-if "music" in data:
-  set music = data["music"]
-if "hardmode" in data:
-  set hardmode = data["hardmode"]
-
-fn show_settings():
-  if sound:
-    print "Sound: ON"
-  else:
-    print "Sound: OFF"
-
-  if music:
-    print "Music: ON"
-  else:
-    print "Music: OFF"
-
-  if hardmode:
-    print "Hard Mode: ON"
-  else:
-    print "Hard Mode: OFF"
-
-fn play_game():
-  print "Game started"
-  if hardmode:
-    print "Enemies are stronger"
-  else:
-    print "Normal difficulty"
-
-fn save_settings():
-  json.save("demo_settings", {"sound": sound, "music": music, "hardmode": hardmode})
-  print "Settings saved"
-
-(sound) = checkmark "Sound" color "green"
-(music) = checkmark "Music" color "cyan"
-(hardmode) = checkmark "Hard Mode" color "red"
-
-button "Show Settings":
-  action:
-    show_settings()
-
-button "Play":
-  action:
-    play_game()
-
-button "Save Settings":
-  action:
-    save_settings()
-
-button "Exit":
-  action:
-    end
-```
-
----
-
-# Structure explanation
-
-- `nc.py` → main interpreter
-- `nc_console.py` → CLI runner and EXE export
-- `nc_server.py` → server-based NC execution
-- `nc_twin_run.py` → GUI/TWIN host
-- `examples/` → learning examples
-- `docs/` → beginner-friendly documentation
-- `standart_imports/` → standard import modules as named in the interpreter configuration
-
-## Suggested `requirements.txt`
+The tests cover core language compatibility, module imports, diagnostics,
+2D rigid bodies, 3D rigid bodies, cloth, determinism, callbacks, and headless UI
+state. GUI dependencies are imported lazily, so the headless suite does not
+require an active display server.
+
+Contributions should preserve NC's two-space syntax and backward compatibility.
+Changes to language behavior should be considered across the complete chain:
 
 ```text
-pyinstaller
-PySide6
-PySide6-QtWebEngine
+source -> parser -> internal representation -> analysis -> interpreter
+       -> runtime -> output
 ```
+
+New behavior should include focused tests, clear English diagnostics, and an
+update to the relevant documentation. Architecture quality, consistency, and
+maintainability take priority over adding features quickly.
+
+## Documentation
+
+- [INSTALLING.md](INSTALLING.md) — installation and platform details
+- [PHYSICS_API.md](PHYSICS_API.md) — 2D, 3D, cloth, callbacks, and rendering
+- [UI_APP_API.md](UI_APP_API.md) — desktop UI API
+- [DIAGNOSTICS.md](DIAGNOSTICS.md) — error codes and formatting rules
+- [ARCHITECTURE.md](ARCHITECTURE.md) — runtime boundaries and design decisions
+- [CHANGELOG.md](CHANGELOG.md) — release changes
