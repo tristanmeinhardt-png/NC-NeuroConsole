@@ -18,7 +18,7 @@
 #     content_css, content_js
 # - Optional command to run JS on the currently loaded HTML:
 #     cmd/action: "html.eval" (or "js.eval") with field: code
-# - --exe support: build a standalone Windows EXE that launches this GUI host
+# - --exe support: build a standalone executable that launches this GUI host
 #   and still opens real TWIN / t_windows windows.
 #
 # NOTE:
@@ -30,7 +30,6 @@ from __future__ import annotations
 import argparse
 import contextlib
 import io
-import traceback
 import base64
 import json
 import os
@@ -100,6 +99,8 @@ def _safe_exe_name_from_target(target: str) -> str:
     base = os.path.basename(target)
     if base.lower().endswith(".nc"):
         base = base[:-3]
+    if base.lower().endswith(".nce"):
+        base = base[:-4]
     base = base.strip() or "nc_twin_app"
     cleaned = []
     for ch in base:
@@ -750,16 +751,16 @@ class HostApp:
         code = str(code or "")
         win = self.windows.get(str(wid)) or self._default_log_window()
         if not code.strip():
-            self._append_to_window_log(wid, "[bridge] Kein NC-Code zum Ausführen erhalten.", is_err=True)
+            self._append_to_window_log(wid, "[bridge] No NC code was provided.", is_err=True)
             if win is not None:
-                win.bridge_post({"type": "nc_result", "ok": False, "stdout": "", "stderr": "Kein NC-Code erhalten."})
+                win.bridge_post({"type": "nc_result", "ok": False, "stdout": "", "stderr": "No NC code was provided."})
             return
         try:
             import nc as _nc
         except Exception as e:
-            self._append_to_window_log(wid, f"[bridge] Konnte nc nicht importieren: {e}", is_err=True)
+            self._append_to_window_log(wid, f"[bridge] Could not import NC: {e}", is_err=True)
             if win is not None:
-                win.bridge_post({"type": "nc_result", "ok": False, "stdout": "", "stderr": f"nc Import fehlgeschlagen: {e}"})
+                win.bridge_post({"type": "nc_result", "ok": False, "stdout": "", "stderr": f"NC import failed: {e}"})
             return
 
         out_buf = io.StringIO()
@@ -775,15 +776,15 @@ class HostApp:
                     enable_ui=True,
                     source_name=source_name,
                 )
-        except Exception:
+        except Exception as error:
             ok = False
-            traceback.print_exc(file=err_buf)
+            err_buf.write(_nc.format_exception(error) + "\n")
 
         stdout_text = self._dispatch_inline_output(wid, out_buf.getvalue(), is_err=False)
         stderr_text = self._dispatch_inline_output(wid, err_buf.getvalue(), is_err=True)
 
         if not stdout_text and not stderr_text:
-            stdout_text = "[nc] Code ausgeführt."
+            stdout_text = "[nc] Code executed."
             self._append_to_window_log(wid, stdout_text, is_err=False)
 
         if win is not None:
@@ -1136,6 +1137,16 @@ def build_exe_from_twin_target(target: str, base: str, search_paths: list[str]) 
         "nc_console",
         "nc",
         "t_windows",
+        "nc_diagnostics",
+        "nc_runtime_support",
+        "nc_module_registry",
+        "nc_ui_app",
+        "nc_physics2d",
+        "nc_physics2d_app",
+        "nc_physics3d",
+        "nc_physics3d_app",
+        "panda3d.core",
+        "direct.showbase.ShowBase",
         # stdlib imports that the frozen launcher / host / nc runtime need very early
         "argparse",
         "base64",
@@ -1247,7 +1258,8 @@ if __name__ == "__main__":
                 ) from None
             raise RuntimeError(details)
 
-    exe_path = output_root / "dist" / exe_name / f"{exe_name}.exe"
+    executable_suffix = ".exe" if os.name == "nt" else ""
+    exe_path = output_root / "dist" / exe_name / f"{exe_name}{executable_suffix}"
     if not exe_path.is_file():
         raise RuntimeError(f"Build finished but EXE was not found: {exe_path}")
     return str(exe_path)
@@ -1303,10 +1315,16 @@ def _build_parser() -> argparse.ArgumentParser:
         prog="ncw",
         description="NC GUI Host / TWIN runner"
     )
-    parser.add_argument("target", nargs="?", help="Path or URL to the .nc file")
+    try:
+        import nc as _nc_version_source
+
+        parser.add_argument("--version", action="version", version=f"NCW {_nc_version_source.__version__}")
+    except Exception:
+        pass
+    parser.add_argument("target", nargs="?", help="Path or URL to the .nc/.nce file")
     parser.add_argument("--base", dest="base", help="Base path or URL directory")
     parser.add_argument("--libs", dest="libs", action="append", default=[], help="Additional library search path (repeatable)")
-    parser.add_argument("--exe", dest="exe", action="store_true", help="Build the target as a Windows EXE")
+    parser.add_argument("--exe", dest="exe", action="store_true", help="Build the target as a standalone executable")
     return parser
 
 
@@ -1343,8 +1361,11 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     target = args.target
-    if (not _is_url(target)) and (not target.lower().endswith(".nc")) and os.path.isfile(target + ".nc"):
-        target = target + ".nc"
+    if (not _is_url(target)) and (not target.lower().endswith((".nc", ".nce"))):
+        if os.path.isfile(target + ".nc"):
+            target = target + ".nc"
+        elif os.path.isfile(target + ".nce"):
+            target = target + ".nce"
 
     base = args.base or _compute_base(target)
     search_paths: list[str] = []
