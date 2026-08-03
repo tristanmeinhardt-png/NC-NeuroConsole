@@ -1,4 +1,4 @@
-# nc.py — NeuroConsole (NC) v1.2.0-alpha.1 core
+# nc.py — NeuroConsole (NC) v1.2.0-alpha.2 core
 # ============================================================
 # Includes:
 #  Parser keeps indentation after stripping comments (your new parser logic)
@@ -42,7 +42,7 @@ from urllib.parse import urlparse, urljoin
 import nc_diagnostics as _diagnostics
 
 
-__version__ = "1.2.0-alpha.1"
+__version__ = "1.2.0-alpha.2"
 
 
 # -----------------------------
@@ -394,6 +394,81 @@ def _split_commas(s: str) -> List[str]:
     if part:
         out.append(part)
     return out
+
+
+_INLINE_COMMAND_KEYWORDS = (
+    "button", "botton", "knopf", "checkmark", "checkbox", "check",
+    "haken", "haekchen", "häckchen", "print", "input",
+)
+
+
+def _split_inline_commands(s: str) -> List[Tuple[str, str]]:
+    """Split an explicit horizontal NC control/output row.
+
+    A command boundary is recognized only outside strings and nested
+    expressions. This keeps values such as ``print "button A"`` intact while
+    allowing rows like ``button "A" button "B"``.
+    """
+    text = str(s or "").strip()
+    if not text:
+        return []
+
+    positions: List[Tuple[int, int, str]] = []  # (command start, keyword start, keyword)
+    quote: Optional[str] = None
+    escaped = False
+    depth_paren = depth_brack = depth_brace = 0
+    i = 0
+    while i < len(text):
+        ch = text[i]
+        if quote:
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == quote:
+                quote = None
+            i += 1
+            continue
+
+        if ch in ("'", '"'):
+            quote = ch
+            i += 1
+            continue
+        if ch == "(":
+            depth_paren += 1
+        elif ch == ")":
+            depth_paren = max(0, depth_paren - 1)
+        elif ch == "[":
+            depth_brack += 1
+        elif ch == "]":
+            depth_brack = max(0, depth_brack - 1)
+        elif ch == "{":
+            depth_brace += 1
+        elif ch == "}":
+            depth_brace = max(0, depth_brace - 1)
+
+        if depth_paren == 0 and depth_brack == 0 and depth_brace == 0:
+            if i == 0 or text[i - 1].isspace():
+                for keyword in _INLINE_COMMAND_KEYWORDS:
+                    end = i + len(keyword)
+                    if text.startswith(keyword, i) and (end == len(text) or not _is_ident_char(text[end])):
+                        command_start = i
+                        if keyword in {"checkmark", "checkbox", "check", "haken", "haekchen", "häckchen", "input"}:
+                            prefix = re.search(r"(?:^|\s)(\([A-Za-z_]\w*\)\s*=\s*)$", text[:i])
+                            if prefix:
+                                command_start = prefix.start(1)
+                        positions.append((command_start, i, keyword))
+                        break
+        i += 1
+
+    if not positions or positions[0][0] != 0:
+        return []
+
+    rows: List[Tuple[str, str]] = []
+    for index, (start, keyword_start, keyword) in enumerate(positions):
+        end = positions[index + 1][0] if index + 1 < len(positions) else len(text)
+        rows.append((keyword, text[start:end].strip()))
+    return rows
 
 
 # ============================================================
@@ -1480,7 +1555,7 @@ _NC_ALIASABLE_KEYWORDS = {
     "pick", "text", "html", "css", "use", "anim",
     "world", "agent", "state", "actions", "bounds", "step",
     "render", "ren", "times",
-    "button", "botton", "knopf", "action", "color", "end",
+    "button", "botton", "knopf", "action", "color", "end", "input",
     "checkmark", "checkbox", "check", "haken", "haekchen", "häckchen", "on", "off",
     "textcolor", "textcollor", "textcolour", "fontcolor", "printcolor",
 
@@ -1700,6 +1775,44 @@ def _console_render_picker_lines(items: List[dict], selected: int) -> List[str]:
         else:
             lines.append(f"{color_code}{base}{reset}")
     return lines
+
+
+def _console_render_inline_row(items: List[dict], selected: int) -> str:
+    """Render a horizontal row; ``selected`` is a selectable-item index."""
+    parts: List[str] = []
+    selectable_index = 0
+    for item in items:
+        kind = str(item.get("kind") or "button")
+        color = item.get("color")
+        color_code = _ansi_from_color(color) if (_stdout_supports_ansi() and color is not None) else ""
+        reset = _ansi_reset() if color_code else ""
+
+        if kind == "print":
+            text = " ".join(str(value) for value in item.get("values") or [])
+            parts.append(f"{color_code}{text}{reset}")
+            continue
+
+        if kind == "checkmark":
+            mark = "✓" if bool(item.get("checked")) else " "
+            text = f"[{mark}] {item.get('label', 'Checkmark')}"
+        elif kind == "input":
+            text = f"[✎ {item.get('prompt', 'Input')}]"
+        else:
+            text = str(item.get("label") or "Button")
+
+        if selectable_index == selected:
+            text = f"> {text}"
+            if _stdout_supports_ansi():
+                text = f"\033[7m{color_code}{text}{reset}\033[0m"
+            elif color_code:
+                text = f"{color_code}{text}{reset}"
+        else:
+            text = f"  {text}"
+            if color_code:
+                text = f"{color_code}{text}{reset}"
+        parts.append(text)
+        selectable_index += 1
+    return "    ".join(parts)
 
 def _console_read_key() -> str:
     if not _stdin_is_tty():
@@ -2267,6 +2380,12 @@ class NCParser:
                 if s.startswith("fn "):
                     raise SyntaxError("fn block is missing ':' at the end")
 
+                inline = self._parse_inline_row(s, ln)
+                if inline is not None:
+                    out.append(inline)
+                    i += 1
+                    continue
+
                 if re.match(r"(?:button|botton|knopf)\s+.+:$", s):
                     stmt, i = self._parse_button(i, indent)
                     out.append(stmt)
@@ -2327,6 +2446,69 @@ class NCParser:
                 i += 1
                 continue
         return out, i
+
+    def _parse_inline_row(self, s: str, ln: int) -> Optional[Stmt]:
+        """Parse explicit same-line output/control rows.
+
+        The syntax deliberately uses NC's normal word-based calls rather than
+        Python-style parentheses, for example::
+
+            button "A" button "B"
+            print "Hello" print name
+            (sound) = checkmark "Sound" (music) = checkmark "Music"
+            input "Name" input "City"
+
+        A single command is left to the existing statement parsers so old NC
+        programs keep their exact behavior.
+        """
+        commands = _split_inline_commands(s)
+        if len(commands) < 2:
+            return None
+
+        items: List[Dict[str, Any]] = []
+        checkmark_kinds = {"checkmark", "checkbox", "check", "haken", "haekchen", "häckchen"}
+        button_kinds = {"button", "botton", "knopf"}
+        for index, (keyword, segment) in enumerate(commands):
+            if keyword in button_kinds:
+                match = re.match(r"(?:button|botton|knopf)\s+(.+)$", segment)
+                if not match or not match.group(1).strip():
+                    raise SyntaxError("Inline button needs a label, for example: button \"A\"")
+                items.append({"kind": "button", "label": match.group(1).strip(), "color": None})
+                continue
+
+            if keyword in checkmark_kinds:
+                pattern = r"(?:\(([A-Za-z_]\w*)\)\s*=\s*)?(?:" + re.escape(keyword) + r")\s+(.+?)\s+color\s+(.+)$"
+                match = re.match(pattern, segment)
+                if match:
+                    name, label, color = match.group(1), match.group(2), match.group(3)
+                else:
+                    pattern = r"(?:\(([A-Za-z_]\w*)\)\s*=\s*)?(?:" + re.escape(keyword) + r")\s+(.+)$"
+                    match = re.match(pattern, segment)
+                    if not match:
+                        raise SyntaxError("Inline checkmark needs a label, for example: checkmark \"Sound\"")
+                    name, label, color = match.group(1), match.group(2), None
+                if not name:
+                    name = f"__inline_checkmark_{ln}_{index}"
+                items.append({"kind": "checkmark", "name": name, "label": label.strip(), "color": color.strip() if color else None})
+                continue
+
+            if keyword == "print":
+                match = re.match(r"print\s+(.+)$", segment)
+                if not match:
+                    raise SyntaxError("Inline print needs a value")
+                items.append({"kind": "print", "args": _split_commas(match.group(1))})
+                continue
+
+            if keyword == "input":
+                match = re.match(r"(?:\(([A-Za-z_]\w*)\)\s*=\s*)?input\s+(.+)$", segment)
+                if not match:
+                    raise SyntaxError("Inline input needs a prompt, for example: input \"Name\"")
+                items.append({"kind": "input", "name": match.group(1), "prompt": match.group(2).strip()})
+                continue
+
+            raise SyntaxError(f"Unsupported inline command: {keyword}")
+
+        return Stmt("inline_row", {"items": items}, ln)
 
     def _parse_simple_stmt(self, s: str, ln: int) -> Stmt:
         m = re.match(r"export\s+([A-Za-z_]\w*)$", s)
@@ -2465,14 +2647,12 @@ class NCParser:
         if m:
             return Stmt("render", {"title": m.group(1), "w": m.group(2), "h": m.group(3)}, ln)
 
-        if re.match(r"[A-Za-z_]\w*\s*=\s*.+$", s):
-            name = s.split("=", 1)[0].strip()
-            raise SyntaxError(
-                f"Unknown assignment syntax '{name} = ...'. "
-                f"Use 'let {name} = ...' for a new variable, 'set {name} = ...' for an existing variable, "
-                f"or '<keyword/operator> = <alias>' only for NC keywords/operators like "
-                f"'print = druck', 'if = wenn', 'and = und', 'not in = nicht in' or '== = gleich'."
-            )
+        # Plain assignment is the concise update form. ``let`` and ``set``
+        # remain available and retain their existing semantics; accepting
+        # ``name = value`` is especially useful in button preparation blocks.
+        m = re.match(r"([A-Za-z_]\w*)\s*=\s*(.+)$", s)
+        if m:
+            return Stmt("set", {"name": m.group(1), "expr": m.group(2).strip()}, ln)
 
         return Stmt("expr", {"expr": s}, ln)
 
@@ -2549,6 +2729,8 @@ class NCParser:
         i += 1
         color_expr = None
         action_body = None
+        preparation_body: List[Stmt] = []
+        action_seen = False
 
         while i < len(self.lines):
             ind2, s2, ln2 = self.lines[i]
@@ -2561,6 +2743,8 @@ class NCParser:
 
             m_color = re.match(r"color\s+(.+)$", s2)
             if m_color:
+                if action_seen:
+                    raise SyntaxError("button color and preparation statements must be before 'action:'")
                 color_expr = m_color.group(1).strip()
                 i += 1
                 continue
@@ -2570,14 +2754,35 @@ class NCParser:
                     raise SyntaxError("action block is missing ':' at the end")
                 i += 1
                 action_body, i = self._parse_block(i, indent + 2)
+                action_seen = True
                 continue
 
-            raise SyntaxError("Only 'color ...' and 'action:' are allowed inside a button")
+            if action_seen:
+                raise SyntaxError("Only one action block is allowed inside a button")
+
+            # These statements run only after this button is selected,
+            # immediately before its action body. This keeps button-specific
+            # setup local to the selected action while allowing several lines
+            # of let/set/plain-assignment preparation.
+            preparation = self._parse_simple_stmt(s2, ln2)
+            if preparation.kind not in {"let", "set"}:
+                raise SyntaxError("Only 'color ...', variable assignments, and 'action:' are allowed inside a button")
+            preparation_body.append(preparation)
+            i += 1
 
         if action_body is None:
             raise SyntaxError("button is missing an action block")
 
-        return Stmt("button", {"label": label_expr, "color": color_expr, "action": action_body}, ln), i
+        return Stmt(
+            "button",
+            {
+                "label": label_expr,
+                "color": color_expr,
+                "preparation": preparation_body,
+                "action": action_body,
+            },
+            ln,
+        ), i
 
     def _parse_table(self, i: int, indent: int) -> Tuple[Stmt, int]:
         _ind, s, ln = self.lines[i]
@@ -4901,6 +5106,11 @@ class NCInterpreter:
             self._current_index = i
             self._tick_steps(1)
             try:
+                if st.kind == "inline_row":
+                    self._exec_inline_row(st, env, base_dir, extra_paths, in_module, source_name)
+                    i += 1
+                    continue
+
                 if st.kind in ("button", "checkmark"):
                     group = [st]
                     j = i + 1
@@ -4930,6 +5140,122 @@ class NCInterpreter:
             except Exception as e:
                 raise NCError(_format_source(source_name), st.line, str(e), self._import_stack) from e
             i += 1
+
+    def _exec_inline_row(self, st: Stmt, env: Dict[str, Any], base_dir: str, extra_paths: Optional[List[str]], in_module: bool, source_name: str):
+        """Execute a same-line print/control row in the terminal."""
+        items: List[dict] = []
+        for raw in list(st.data.get("items") or []):
+            kind = str(raw.get("kind") or "button")
+            color = env.get("__button_color_all__")
+            color_expr = raw.get("color")
+            if color_expr:
+                try:
+                    color = self._eval_expr(str(color_expr), env, self.policy)
+                except Exception:
+                    color = color_expr
+
+            if kind == "print":
+                values: List[str] = []
+                for expression in list(raw.get("args") or []):
+                    values.append(str(self._eval_expr(str(expression), env, self.policy)))
+                items.append({"kind": "print", "values": values, "color": env.get("__text_color__")})
+                continue
+
+            if kind == "checkmark":
+                name = str(raw.get("name") or "")
+                if name and name not in env:
+                    env[name] = False
+                label = self._eval_expr(str(raw.get("label") or '"Checkmark"'), env, self.policy)
+                items.append({
+                    "kind": "checkmark",
+                    "name": name,
+                    "label": "" if label is None else str(label),
+                    "checked": bool(env.get(name, False)),
+                    "color": color,
+                })
+                continue
+
+            if kind == "input":
+                prompt = self._eval_expr(str(raw.get("prompt") or '"Input"'), env, self.policy)
+                items.append({
+                    "kind": "input",
+                    "name": str(raw.get("name") or ""),
+                    "prompt": "" if prompt is None else str(prompt),
+                    "color": color,
+                })
+                continue
+
+            label = self._eval_expr(str(raw.get("label") or '"Button"'), env, self.policy)
+            items.append({
+                "kind": "button",
+                "label": "" if label is None else str(label),
+                "color": color,
+            })
+
+        selectable = [item for item in items if item.get("kind") in {"button", "checkmark", "input"}]
+        if not selectable:
+            text = "    ".join(
+                " ".join(str(value) for value in item.get("values") or [])
+                for item in items
+                if item.get("kind") == "print"
+            )
+            _console_print_colored(text, env.get("__text_color__"))
+            return
+
+        def choose_noninteractive() -> dict:
+            return selectable[0]
+
+        if not _stdin_is_tty():
+            current = choose_noninteractive()
+            self._finish_inline_selection(current, selectable, items, env, source_name)
+            return
+
+        selected = 0
+        while True:
+            for item in selectable:
+                if item.get("kind") == "checkmark":
+                    item["checked"] = bool(env.get(str(item.get("name") or ""), False))
+            line = _console_render_inline_row(items, selected)
+            print(line)
+            key = _console_read_key()
+            if key == "left":
+                selected = (selected - 1) % len(selectable)
+            elif key == "right":
+                selected = (selected + 1) % len(selectable)
+            elif key in {"enter", "down", "up"} or not key:
+                current = selectable[selected]
+                if current.get("kind") == "checkmark":
+                    name = str(current.get("name") or "")
+                    if name:
+                        env[name] = not bool(env.get(name, False))
+                        current["checked"] = bool(env[name])
+                    if _stdout_is_tty():
+                        print("\033[1A\033[2K", end="")
+                    continue
+                self._finish_inline_selection(current, selectable, items, env, source_name)
+                return
+            if _stdout_is_tty():
+                print("\033[1A\033[2K", end="")
+
+    def _finish_inline_selection(self, current: dict, selectable: List[dict], items: List[dict], env: Dict[str, Any], source_name: str):
+        kind = str(current.get("kind") or "button")
+        if kind == "checkmark":
+            name = str(current.get("name") or "")
+            if name:
+                env[name] = not bool(env.get(name, False))
+                current["checked"] = bool(env[name])
+            return
+        if kind == "input":
+            prompt = str(current.get("prompt") or "")
+            value = input(prompt + (" " if prompt else ""))
+            name = str(current.get("name") or "")
+            if name:
+                env[name] = value
+            env["__last_input__"] = value
+            env["__last_input_index__"] = selectable.index(current)
+            return
+        env["__last_button__"] = str(current.get("label") or "")
+        env["__last_button_index__"] = selectable.index(current)
 
     def _exec_button_group(self, group: List[Stmt], env: Dict[str, Any], base_dir: str, extra_paths: Optional[List[str]], in_module: bool, source_name: str):
         items = []
@@ -4962,7 +5288,7 @@ class NCInterpreter:
                 item["name"] = var_name
                 item["checked"] = bool(env.get(var_name, False))
             else:
-                item["body"] = list(st.data.get("action") or [])
+                item["body"] = list(st.data.get("preparation") or []) + list(st.data.get("action") or [])
             items.append(item)
 
         if not items:

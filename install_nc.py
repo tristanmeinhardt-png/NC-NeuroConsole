@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import os
 import platform
+import re
 import shlex
 import shutil
 import subprocess
@@ -19,6 +20,8 @@ INSTALL_FOLDER_NAME = "NC"
 COPY_EXTENSIONS = {".py", ".cmd", ".bat", ".sh", ".command", ".txt", ".md", ".nc"}
 COPY_DIRECTORIES = {"examples", "tests", "standart_imports"}
 SKIP_NAMES = {"__pycache__", ".git", ".venv", "nc_exe_build", "nc_twin_exe_build"}
+COMMAND_FOLDER_NAME = "NC-bin"
+VERSION_FILE_NAME = "version.txt"
 
 
 class InstallError(RuntimeError):
@@ -36,6 +39,104 @@ def _require_supported_python() -> None:
 
 def _default_target() -> Path:
     return Path.home() / INSTALL_FOLDER_NAME
+
+
+def _distribution_version(source: Path) -> str:
+    match = re.search(r"^__version__\s*=\s*[\"']([^\"']+)[\"']", (source / "nc.py").read_text(encoding="utf-8"), re.MULTILINE)
+    if not match:
+        raise InstallError("Could not determine the NC version from nc.py")
+    return match.group(1).strip()
+
+
+def _safe_version_name(version: str) -> str:
+    name = re.sub(r"[^A-Za-z0-9._+-]+", "_", str(version).strip())
+    return name.strip(" .") or "unknown"
+
+
+def _version_key(version: str) -> tuple:
+    """Compare common NC versions without depending on packaging libraries."""
+    match = re.match(r"^(\d+)\.(\d+)\.(\d+)(?:[-.]?(.*))?$", str(version).strip())
+    if not match:
+        return (0, 0, 0, 0, ((1, str(version)),))
+    suffix = match.group(4) or ""
+    tokens = []
+    for token in re.split(r"[.-]+", suffix):
+        if not token:
+            continue
+        tokens.append((0, int(token)) if token.isdigit() else (1, token.lower()))
+    # A release without a suffix sorts after alpha/beta/rc versions.
+    return (int(match.group(1)), int(match.group(2)), int(match.group(3)), 1 if not suffix else 0, tuple(tokens))
+
+
+def _installed_version(target: Path) -> str | None:
+    marker = target / VERSION_FILE_NAME
+    if marker.is_file():
+        value = marker.read_text(encoding="utf-8", errors="replace").strip()
+        if value:
+            return value
+    try:
+        return _distribution_version(target)
+    except Exception:
+        return None
+
+
+def _select_install_target(requested: Path | None, version: str, mode: str) -> Path:
+    """Choose overwrite or the required ``NC (version)`` side-by-side path."""
+    if requested is not None:
+        if mode != "ask":
+            raise InstallError("--overwrite/--additional cannot be combined with an explicit --target")
+        return requested.expanduser().resolve()
+
+    primary = _default_target().resolve()
+    if not primary.exists():
+        return primary
+
+    old_version = _installed_version(primary)
+    if old_version == version:
+        return primary
+
+    if mode == "overwrite":
+        return primary
+    if mode == "additional":
+        return primary.parent / f"{primary.name} ({_safe_version_name(version)})"
+
+    if not sys.stdin.isatty():
+        old_label = old_version or "unbekannte Version"
+        raise InstallError(
+            f"{primary} already contains {old_label}. Use --overwrite to replace it "
+            f"or --additional to install {version} beside it."
+        )
+
+    old_label = old_version or "unbekannte Version"
+    print(f"An older NC installation was found: {old_label}")
+    print(f"New version: {version}")
+    answer = input("[O]verwrite the old installation or [A]dd a side-by-side installation? [A/o]: ").strip().lower()
+    if answer.startswith("o"):
+        return primary
+    return primary.parent / f"{primary.name} ({_safe_version_name(version)})"
+
+
+def _write_version_marker(target: Path, version: str) -> None:
+    (target / VERSION_FILE_NAME).write_text(str(version).strip() + "\n", encoding="utf-8")
+
+
+def _newest_installed_target(current_target: Path) -> Path:
+    candidates = [current_target.resolve(), _default_target().resolve()]
+    home = Path.home()
+    candidates.extend(
+        path.resolve()
+        for path in home.glob(f"{INSTALL_FOLDER_NAME} (*)")
+        if path.is_dir()
+    )
+    unique: dict[str, Path] = {}
+    for candidate in candidates:
+        if candidate.is_dir():
+            unique[os.path.normcase(os.fspath(candidate))] = candidate
+    available = [(path, _installed_version(path)) for path in unique.values()]
+    available = [(path, version) for path, version in available if version]
+    if not available:
+        return current_target.resolve()
+    return max(available, key=lambda item: _version_key(str(item[1])))[0]
 
 
 def _venv_python(target: Path) -> Path:
@@ -96,7 +197,7 @@ def _create_or_update_environment(target: Path, skip_dependencies: bool) -> Path
     return python
 
 
-def _append_windows_user_path(folder: Path) -> bool:
+def _ensure_windows_user_path_first(folder: Path) -> bool:
     try:
         import winreg
 
@@ -109,9 +210,8 @@ def _append_windows_user_path(folder: Path) -> bool:
             entries = [entry.strip() for entry in str(current).split(";") if entry.strip()]
             normalized = {os.path.normcase(os.path.normpath(os.path.expandvars(entry))) for entry in entries}
             wanted = os.path.normcase(os.path.normpath(os.fspath(folder)))
-            if wanted in normalized:
-                return False
-            entries.append(os.fspath(folder))
+            entries = [entry for entry in entries if os.path.normcase(os.path.normpath(os.path.expandvars(entry))) != wanted]
+            entries.insert(0, os.fspath(folder))
             winreg.SetValueEx(key, "Path", 0, value_type, ";".join(entries))
             return True
         finally:
@@ -151,14 +251,67 @@ def _ensure_posix_path(bin_folder: Path) -> list[Path]:
     return changed
 
 
-def _install_commands(target: Path, python: Path, update_path: bool) -> None:
+def _write_windows_dispatcher(path: Path, script_name: str) -> None:
+    path.write_text(
+        "@echo off\n"
+        "setlocal\n"
+        "set \"NC_COMMAND_ROOT=%~dp0\"\n"
+        "set \"NC_TARGET=\"\n"
+        "set \"NC_SELECTOR=%~1\"\n"
+        "if \"%NC_SELECTOR:~0,2%\"==\"--\" if exist \"%USERPROFILE%\\NC (%NC_SELECTOR:~2%)\\version.txt\" set \"NC_TARGET=%USERPROFILE%\\NC (%NC_SELECTOR:~2%)\"\n"
+        "if \"%NC_SELECTOR:~0,2%\"==\"--\" if exist \"%USERPROFILE%\\NC\\version.txt\" for /f \"usebackq delims=\" %%V in (\"%USERPROFILE%\\NC\\version.txt\") do if /i \"%%V\"==\"%NC_SELECTOR:~2%\" set \"NC_TARGET=%USERPROFILE%\\NC\"\n"
+        "if not defined NC_TARGET if exist \"%NC_COMMAND_ROOT%latest.txt\" set /p NC_TARGET=<\"%NC_COMMAND_ROOT%latest.txt\"\n"
+        "if not defined NC_TARGET set \"NC_TARGET=%USERPROFILE%\\NC\"\n"
+        "if not exist \"%NC_TARGET%\\.venv\\Scripts\\python.exe\" (\n"
+        "  echo NC version target not found: %NC_TARGET% 1>&2\n"
+        "  exit /b 1\n"
+        ")\n"
+        f'"%NC_TARGET%\\.venv\\Scripts\\python.exe" "%NC_TARGET%\\{script_name}" %*\n'
+        "set \"NC_RESULT=%errorlevel%\"\n"
+        "endlocal & exit /b %NC_RESULT%\n",
+        encoding="utf-8",
+        newline="\r\n",
+    )
+
+
+def _write_posix_dispatcher(path: Path, script_name: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        "#!/bin/sh\nset -eu\n"
+        'COMMAND_ROOT=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)\n'
+        'TARGET=""\n'
+        'if [ "$#" -gt 0 ]; then\n'
+        '  case "$1" in\n'
+        '    --*) CANDIDATE=${1#--}; if [ -f "$HOME/NC ($CANDIDATE)/version.txt" ]; then TARGET="$HOME/NC ($CANDIDATE)"; elif [ -f "$HOME/NC/version.txt" ] && [ "$(cat "$HOME/NC/version.txt")" = "$CANDIDATE" ]; then TARGET="$HOME/NC"; fi ;;\n'
+        '  esac\n'
+        'fi\n'
+        'if [ -z "$TARGET" ] && [ -f "$COMMAND_ROOT/latest.txt" ]; then TARGET=$(cat "$COMMAND_ROOT/latest.txt"); fi\n'
+        'if [ -z "$TARGET" ]; then TARGET="$HOME/NC"; fi\n'
+        'PYTHON="$TARGET/.venv/bin/python"\n'
+        'if [ ! -x "$PYTHON" ]; then echo "NC version target not found: $TARGET" >&2; exit 1; fi\n'
+        'exec "$PYTHON" "$TARGET/' + script_name + '" "$@"\n',
+        encoding="utf-8",
+        newline="\n",
+    )
+    path.chmod(0o755)
+
+
+def _install_commands(target: Path, python: Path, version: str, update_path: bool) -> None:
+    command_folder = Path.home() / COMMAND_FOLDER_NAME
+    command_folder.mkdir(parents=True, exist_ok=True)
+    newest_target = _newest_installed_target(target)
+    (command_folder / "latest.txt").write_text(os.fspath(newest_target) + "\n", encoding="utf-8")
     if os.name == "nt":
-        if update_path and _append_windows_user_path(target):
-            print("Added the NC folder to the Windows user PATH.")
+        _write_windows_dispatcher(command_folder / "nc.cmd", "nc_console.py")
+        _write_windows_dispatcher(command_folder / "ncw.cmd", "nc_twin_run.py")
+        _write_windows_dispatcher(command_folder / "nc.bat", "nc_console.py")
+        _write_windows_dispatcher(command_folder / "ncw.bat", "nc_twin_run.py")
+        if update_path and _ensure_windows_user_path_first(command_folder):
+            print("Added the NC command folder first in the Windows user PATH.")
         return
     user_bin = Path.home() / ".local" / "bin"
-    _write_posix_launcher(user_bin / "nc", python, target / "nc_console.py")
-    _write_posix_launcher(user_bin / "ncw", python, target / "nc_twin_run.py")
+    _write_posix_dispatcher(user_bin / "nc", "nc_console.py")
+    _write_posix_dispatcher(user_bin / "ncw", "nc_twin_run.py")
     if update_path:
         changed = _ensure_posix_path(user_bin)
         for profile in changed:
@@ -179,7 +332,10 @@ def _self_test(target: Path, python: Path) -> None:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Install NC and its nc/ncw commands.")
-    parser.add_argument("--target", type=Path, default=_default_target(), help="Installation folder (default: ~/NC)")
+    parser.add_argument("--target", type=Path, default=None, help="Explicit installation folder")
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--overwrite", action="store_true", help="Replace the existing default NC installation")
+    mode.add_argument("--additional", action="store_true", help="Install beside the old version as NC (version)")
     parser.add_argument("--skip-dependencies", action="store_true", help="Do not install Python packages")
     parser.add_argument("--no-path", action="store_true", help="Do not add the command folder to the user PATH")
     parser.add_argument("--no-self-test", action="store_true", help="Skip the post-installation self-test")
@@ -188,17 +344,22 @@ def main(argv: list[str] | None = None) -> int:
     try:
         _require_supported_python()
         source = Path(__file__).resolve().parent
-        target = args.target.expanduser().resolve()
+        version = _distribution_version(source)
+        install_mode = "overwrite" if args.overwrite else "additional" if args.additional else "ask"
+        target = _select_install_target(args.target, version, install_mode)
         print(f"Installing NC from {source}")
+        print(f"Version: {version}")
         print(f"Destination: {target}")
         _copy_distribution(source, target)
+        _write_version_marker(target, version)
         python = _create_or_update_environment(target, bool(args.skip_dependencies))
-        _install_commands(target, python, update_path=not args.no_path)
+        _install_commands(target, python, version, update_path=not args.no_path)
         if not args.no_self_test:
             print("Running NC self-test...")
             _self_test(target, python)
         print("NC installation completed successfully.")
         print("Open a new terminal, then run: nc <file.nc> or ncw <file.nc>")
+        print(f"The default nc command now selects the newest installed version; use nc --{version} for this version explicitly.")
         return 0
     except (InstallError, OSError, subprocess.CalledProcessError) as error:
         print(f"NC INSTALL ERROR: {error}", file=sys.stderr)

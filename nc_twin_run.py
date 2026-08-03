@@ -95,6 +95,24 @@ def _is_url(s: str) -> bool:
     return str(s).startswith("https://") or str(s).startswith("http://")
 
 
+def _resolve_local_target(target: str) -> str:
+    """Resolve a relative target from the shell, then from NC's install folder."""
+    if _is_url(target) or os.path.isabs(target):
+        return target
+    candidates = [Path.cwd() / target, Path(__file__).resolve().parent / target]
+    if not target.lower().endswith((".nc", ".nce")):
+        candidates.extend([
+            Path.cwd() / (target + ".nc"),
+            Path.cwd() / (target + ".nce"),
+            Path(__file__).resolve().parent / (target + ".nc"),
+            Path(__file__).resolve().parent / (target + ".nce"),
+        ])
+    for candidate in candidates:
+        if candidate.is_file():
+            return str(candidate.resolve())
+    return target
+
+
 def _safe_exe_name_from_target(target: str) -> str:
     base = os.path.basename(target)
     if base.lower().endswith(".nc"):
@@ -1128,6 +1146,7 @@ def build_exe_from_twin_target(target: str, base: str, search_paths: list[str]) 
     build_root = Path(base if (base and not _is_url(base)) else os.path.dirname(src_path)).resolve()
     output_root = build_root / "nc_twin_exe_build"
     output_root.mkdir(parents=True, exist_ok=True)
+    data_separator = ";" if os.name == "nt" else ":"
 
     safe_search_paths = _existing_search_paths(search_paths)
     module_name = Path(THIS_FILE).stem
@@ -1209,7 +1228,9 @@ import io  # noqa: F401
 import ast  # noqa: F401
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-EXTRA_PATHS = {safe_search_paths!r}
+PROGRAM_ROOT = os.path.join(HERE, "program")
+SOURCE_PATH = os.path.join(PROGRAM_ROOT, {os.path.basename(src_path)!r})
+EXTRA_PATHS = [PROGRAM_ROOT, os.path.join(PROGRAM_ROOT, "libs")]
 for _p in list(EXTRA_PATHS):
     if _p and _p not in sys.path:
         sys.path.insert(0, _p)
@@ -1219,7 +1240,7 @@ if HERE not in sys.path:
 import {module_name} as twin
 
 if __name__ == "__main__":
-    _forward = sys.argv[1:] if len(sys.argv) > 1 else [{src_path!r}]
+    _forward = sys.argv[1:] if len(sys.argv) > 1 else [SOURCE_PATH]
     raise SystemExit(twin.main(_forward))
 '''
 
@@ -1235,6 +1256,8 @@ if __name__ == "__main__":
             "--distpath", str(output_root / "dist"),
             "--workpath", str(output_root / "build"),
             "--specpath", str(output_root / "spec"),
+            "--add-data", f"{str(build_root)}{data_separator}program",
+            "--add-data", f"{str(src_path)}{data_separator}program",
             "--collect-submodules", "PySide6",
             "--collect-submodules", "PySide6.QtWebEngineCore",
             "--collect-submodules", "PySide6.QtWebEngineWidgets",
@@ -1330,12 +1353,38 @@ def _build_parser() -> argparse.ArgumentParser:
 
 def _run_nc_child(argv: list[str]) -> int:
     child = list(argv or [])
+
+    # A frozen PyInstaller executable is not a normal Python interpreter.
+    # Starting ``sys.executable nc_console.py ...`` here would launch this
+    # same GUI executable again, because PyInstaller dispatches the first
+    # argument through this module's GUI entry point.  The old behaviour
+    # therefore created an endless chain of NC Output windows in --exe builds.
+    # Run the bundled console entry point in the child process instead.
+    if getattr(sys, "frozen", False):
+        try:
+            from nc_console import main as console_main
+            return int(console_main(child) or 0)
+        except Exception as error:
+            try:
+                import nc as _nc
+                print(_nc.format_exception(error), file=sys.stderr)
+            except Exception:
+                print(f"NC child error: {error}", file=sys.stderr)
+            return 1
+
     cmd = [sys.executable, NC_CONSOLE] + child
     proc = subprocess.run(cmd)
     return int(proc.returncode or 0)
 
 def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
+    try:
+        import nc as _nc_selector_source
+        version_selector = f"--{_nc_selector_source.__version__}"
+        if argv and str(argv[0]).lower() == version_selector.lower():
+            argv = argv[1:]
+    except Exception:
+        pass
 
     if "--__nc_child__" in argv:
         idx = argv.index("--__nc_child__")
@@ -1360,7 +1409,7 @@ def main(argv: list[str] | None = None) -> int:
         parser.print_help(_argparse_stream())
         return 2
 
-    target = args.target
+    target = _resolve_local_target(args.target)
     if (not _is_url(target)) and (not target.lower().endswith((".nc", ".nce"))):
         if os.path.isfile(target + ".nc"):
             target = target + ".nc"

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import os
 import sys
 import time
 from typing import Any
@@ -86,6 +87,9 @@ class Physics2DApplication:
 
     @nc_callable
     def run(self) -> int:
+        if os.environ.get("NC_DISABLE_GRAPHICS") == "1":
+            print("NC: physics2d window disabled for this console executable.")
+            return 0
         try:
             from PySide6.QtCore import QPointF, QRectF, Qt, QTimer
             from PySide6.QtGui import QColor, QPainter, QPainterPath, QPen, QPixmap

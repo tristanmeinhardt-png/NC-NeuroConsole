@@ -1,0 +1,7 @@
+# NC 1.2 runtime dependencies (Python 3.12+)
+PySide6>=6.7,<7
+Pillow>=10.2
+panda3d>=1.10.14
+panda3d-gltf>=1.2.1
+cryptography>=42
+pyinstaller>=6.3

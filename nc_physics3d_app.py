@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import os
 from pathlib import Path
 from typing import Any, Iterable, Sequence
 
@@ -284,6 +285,9 @@ class Physics3DApplication:
 
     @nc_callable
     def run(self) -> int:
+        if os.environ.get("NC_DISABLE_GRAPHICS") == "1":
+            print("NC: physics3d window disabled for this console executable.")
+            return 0
         try:
             from direct.showbase.ShowBase import ShowBase
             from panda3d.core import (

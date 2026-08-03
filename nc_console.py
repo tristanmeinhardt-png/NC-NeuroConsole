@@ -42,6 +42,24 @@ def is_url(s: str) -> bool:
     return s.startswith("https://") or s.startswith("http://")
 
 
+def resolve_local_target(target: str) -> str:
+    """Resolve a relative NC file from the shell, then from NC's install folder."""
+    if is_url(target) or os.path.isabs(target):
+        return target
+    candidates = [Path.cwd() / target, Path(__file__).resolve().parent / target]
+    if not target.lower().endswith((".nc", ".nce")):
+        candidates.extend([
+            Path.cwd() / (target + ".nc"),
+            Path.cwd() / (target + ".nce"),
+            Path(__file__).resolve().parent / (target + ".nc"),
+            Path(__file__).resolve().parent / (target + ".nce"),
+        ])
+    for candidate in candidates:
+        if candidate.is_file():
+            return str(candidate.resolve())
+    return target
+
+
 def read_text_from_target(target: str, policy: nc.NCPolicy) -> str:
     if is_url(target):
         return nc._fetch_url_text(target, policy)
@@ -107,6 +125,7 @@ def build_exe_from_nc(target: str, policy: nc.NCPolicy, base: str, search_paths:
     build_root = Path(base if (base and not is_url(base)) else os.path.dirname(src_path)).resolve()
     output_root = build_root / "nc_exe_build"
     output_root.mkdir(parents=True, exist_ok=True)
+    data_separator = ";" if os.name == "nt" else ":"
 
     safe_search_paths = _existing_search_paths(search_paths)
     hidden_imports = [
@@ -173,7 +192,11 @@ import tarfile  # noqa: F401
 import getpass  # noqa: F401
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-EXTRA_PATHS = {safe_search_paths!r}
+if not {bool(enable_ui)!r}:
+    os.environ["NC_DISABLE_GRAPHICS"] = "1"
+PROGRAM_ROOT = os.path.join(HERE, "program")
+SOURCE_PATH = os.path.join(PROGRAM_ROOT, {os.path.basename(src_path)!r})
+EXTRA_PATHS = [PROGRAM_ROOT, os.path.join(PROGRAM_ROOT, "libs")]
 for _p in list(EXTRA_PATHS):
     if _p and _p not in sys.path:
         sys.path.insert(0, _p)
@@ -185,7 +208,7 @@ import nc as nc
 def main() -> int:
     try:
         nc.run_file(
-            {src_path!r},
+            SOURCE_PATH,
             policy=nc.NCPolicy(
                 allow_http={bool(policy.allow_http)!r},
                 allow_private_hosts={bool(policy.allow_private_hosts)!r},
@@ -220,6 +243,8 @@ if __name__ == "__main__":
             "--distpath", str(output_root / "dist"),
             "--workpath", str(output_root / "build"),
             "--specpath", str(output_root / "spec"),
+            "--add-data", f"{str(build_root)}{data_separator}program",
+            "--add-data", f"{str(src_path)}{data_separator}program",
         ]
         for hidden in hidden_imports:
             cmd.extend(["--hidden-import", hidden])
@@ -241,8 +266,81 @@ if __name__ == "__main__":
     return str(exe_path)
 
 
+def package_macos_dmg(executable: str, output_root: Path, app_name: str) -> str:
+    """Wrap a built NC executable in a minimal macOS .app and .dmg."""
+    if sys.platform != "darwin":
+        raise RuntimeError("--dmg is available only when NC is built on macOS.")
+    hdiutil = shutil.which("hdiutil")
+    if not hdiutil:
+        raise RuntimeError("macOS hdiutil was not found; install or use the native macOS tools.")
+
+    dmg_path = output_root / "dist" / f"{app_name}.dmg"
+    with tempfile.TemporaryDirectory(prefix="nc_dmg_") as temporary:
+        staging = Path(temporary) / app_name
+        app_bundle = staging / f"{app_name}.app"
+        binary_dir = app_bundle / "Contents" / "MacOS"
+        binary_dir.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(executable, binary_dir / app_name)
+        (binary_dir / app_name).chmod(0o755)
+        plist = app_bundle / "Contents" / "Info.plist"
+        plist.write_text(
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
+            "<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n"
+            "<plist version=\"1.0\"><dict>\n"
+            f"<key>CFBundleExecutable</key><string>{app_name}</string>\n"
+            f"<key>CFBundleIdentifier</key><string>org.neuroconsole.{app_name}</string>\n"
+            f"<key>CFBundleName</key><string>{app_name}</string>\n"
+            "<key>CFBundlePackageType</key><string>APPL</string>\n"
+            "<key>CFBundleVersion</key><string>1.2.0-alpha.2</string>\n"
+            "</dict></plist>\n",
+            encoding="utf-8",
+        )
+        proc = subprocess.run(
+            [hdiutil, "create", "-volname", app_name, "-srcfolder", str(staging), "-ov", "-format", "UDZO", str(dmg_path)],
+            capture_output=True,
+            text=True,
+        )
+        if proc.returncode != 0:
+            raise RuntimeError((proc.stderr or proc.stdout or "hdiutil failed").strip())
+    return str(dmg_path)
+
+
+def package_linux_appimage(executable: str, output_root: Path, app_name: str) -> str:
+    """Create a standard Linux AppImage using the optional appimagetool."""
+    if not sys.platform.startswith("linux"):
+        raise RuntimeError("--appimage is available only when NC is built on Linux.")
+    appimagetool = shutil.which("appimagetool")
+    if not appimagetool:
+        raise RuntimeError("appimagetool was not found. Install appimagetool on Linux, then run --appimage again.")
+
+    appdir = output_root / "appimage" / f"{app_name}.AppDir"
+    usr_bin = appdir / "usr" / "bin"
+    usr_bin.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(executable, usr_bin / app_name)
+    (usr_bin / app_name).chmod(0o755)
+    (appdir / "AppRun").write_text(
+        "#!/bin/sh\nexec \"$(dirname \"$0\")/usr/bin/" + app_name + "\" \"$@\"\n",
+        encoding="utf-8",
+    )
+    (appdir / "AppRun").chmod(0o755)
+    (appdir / f"{app_name}.desktop").write_text(
+        "[Desktop Entry]\nType=Application\n"
+        f"Name={app_name}\nExec={app_name}\nTerminal=true\nCategories=Utility;\n",
+        encoding="utf-8",
+    )
+    output_path = output_root / "dist" / f"{app_name}.AppImage"
+    proc = subprocess.run([appimagetool, str(appdir), str(output_path)], capture_output=True, text=True)
+    if proc.returncode != 0:
+        raise RuntimeError((proc.stderr or proc.stdout or "appimagetool failed").strip())
+    return str(output_path)
+
+
 
 def main(argv: list[str]) -> int:
+    argv = list(argv or [])
+    version_selector = f"--{nc.__version__}"
+    if argv and str(argv[0]).lower() == version_selector.lower():
+        argv = argv[1:]
     p = argparse.ArgumentParser(prog="nc", add_help=True)
     p.add_argument("--version", action="version", version=f"NC {nc.__version__}")
     p.add_argument("target", nargs="?", help="Path to .nc file or URL to .nc")
@@ -254,6 +352,8 @@ def main(argv: list[str]) -> int:
     p.add_argument("--no-ui", action="store_true", help="Disable __TWIN__ UI output")
     p.add_argument("--no-log", action="store_true", help="Disable step logs")
     p.add_argument("--exe", action="store_true", help="Build the local .nc file into a standalone executable via PyInstaller")
+    p.add_argument("--dmg", action="store_true", help="On macOS, also create a .dmg package")
+    p.add_argument("--appimage", action="store_true", help="On Linux, also create an AppImage package")
     p.add_argument("--pack-nce", nargs=2, metavar=("SOURCE", "OUTPUT"), help="Create an encrypted .nce package from a .nc file or folder")
     p.add_argument("--nce-entry", default=None, help="Entrypoint inside the .nce package, for example main.nc")
     p.add_argument("--nce-password", default=None, help="Password for reading or creating .nce packages")
@@ -266,6 +366,9 @@ def main(argv: list[str]) -> int:
         nc.run_learn(topic)
         return 0
 
+    if args.dmg and args.appimage:
+        p.error("--dmg and --appimage cannot be used together")
+
     if not args.target:
         if not args.pack_nce:
             p.print_help()
@@ -275,6 +378,8 @@ def main(argv: list[str]) -> int:
         allow_http=bool(args.allow_http),
         allow_private_hosts=bool(args.allow_private),
     )
+    if args.no_ui:
+        os.environ["NC_DISABLE_GRAPHICS"] = "1"
 
     if args.nce_password:
         os.environ["NC_NCE_PASSWORD"] = str(args.nce_password)
@@ -289,7 +394,7 @@ def main(argv: list[str]) -> int:
             print(nc.format_exception(e), file=sys.stderr)
             return 1
 
-    target = args.target
+    target = resolve_local_target(args.target)
 
     # Allow accidental URL/file fragments like "wormpad.nc#"
     target = target.split("#", 1)[0]
@@ -312,15 +417,23 @@ def main(argv: list[str]) -> int:
         search_paths.append(lp)
 
     try:
-        if args.exe:
+        if args.exe or args.dmg or args.appimage:
             exe_path = build_exe_from_nc(
                 target=target,
                 policy=policy,
                 base=base,
                 search_paths=search_paths,
-                enable_ui=(not args.no_ui),
+                # ``nc --exe`` is the console converter. Its generated
+                # executable must stay a console program, even when the NC
+                # source contains a physics ``app.run()`` call.
+                enable_ui=False,
             )
-            print("NC EXE:", exe_path)
+            if args.dmg:
+                print("NC DMG:", package_macos_dmg(exe_path, Path(exe_path).parents[1], _safe_exe_name_from_target(target)))
+            elif args.appimage:
+                print("NC APPIMAGE:", package_linux_appimage(exe_path, Path(exe_path).parents[1], _safe_exe_name_from_target(target)))
+            else:
+                print("NC EXE:", exe_path)
             return 0
 
         if is_url(target):

@@ -21,9 +21,11 @@ install_nc.cmd
 install_nc.bat
 ```
 
-The installer uses the Python Launcher (`py -3.12`) when available. It installs
-to `%USERPROFILE%\NC` and adds that folder to the user PATH. Open a new Command
-Prompt or PowerShell window after installation.
+The installer uses the Python Launcher (`py -3`) when available and then
+checks that it is Python 3.12 or newer. It installs to `%USERPROFILE%\NC` and
+creates a central `%USERPROFILE%\NC-bin` command folder. That folder is placed
+first in the user PATH, so an older `nc.cmd` cannot hide the newest version.
+Open a new Command Prompt or PowerShell window after installation.
 
 ## Linux
 
@@ -32,8 +34,8 @@ chmod +x install_nc.sh
 ./install_nc.sh
 ```
 
-The installer creates `~/.local/bin/nc` and `~/.local/bin/ncw`. If necessary,
-it adds `~/.local/bin` to `~/.profile`.
+The installer creates version-aware dispatchers in `~/.local/bin/nc` and
+`~/.local/bin/ncw`. If necessary, it adds `~/.local/bin` to `~/.profile`.
 
 ## macOS
 
@@ -55,6 +57,31 @@ python install_nc.py --skip-dependencies
 python install_nc.py --no-path
 python install_nc.py --no-self-test
 ```
+
+## Multiple installed versions
+
+If `~/NC` already contains an older NC version, the installer asks whether the
+new version should replace it or be installed beside it. The side-by-side
+folder is named exactly `~/NC (version)`.
+
+For non-interactive installation, choose explicitly:
+
+```text
+python install_nc.py --overwrite
+python install_nc.py --additional
+```
+
+The default `nc` and `ncw` commands use the newest installation recorded by
+the installer. To select a particular version, use its exact version name
+after two dashes:
+
+```text
+nc --1.2.0-alpha.2 program.nc
+ncw --1.2.0-alpha.2 graphical_program.nc
+```
+
+The selector is recognized only when that exact `NC (version)` folder exists;
+normal options such as `--base`, `--libs`, and `--version` remain unchanged.
 
 The installer copies distribution-owned files atomically. It merges rather
 than deletes `standart_imports`, so user modules remain intact. Dependencies

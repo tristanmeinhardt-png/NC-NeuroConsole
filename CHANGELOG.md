@@ -1,5 +1,21 @@
 # Changelog
 
+## 1.2.0 Alpha 2
+
+- Added horizontal console rows for `button`, `checkmark`, `print`, and
+  `input`, navigated with left/right arrow keys.
+- Added button preparation statements before `action:` using `let`, `set`, and
+  plain assignment.
+- Added side-by-side version installation as `NC (version)`.
+- Added central version-aware `nc`/`ncw` dispatchers and exact version
+  selectors.
+- Added native `--dmg` and `--appimage` packaging entry points with platform
+  checks.
+- Fixed relative target lookup from the NC installation directory.
+- Fixed console EXE packaging to include the main NC source and suppress
+  physics windows in console executables.
+- Removed the Windows installer's hard-coded `py -3.12` selection.
+
 ## 1.2.0 Alpha 1
 
 - Added lazy native-module registry and shared runtime validation layer.
